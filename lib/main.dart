@@ -49,6 +49,8 @@ class _TripHomePageState extends State<TripHomePage> {
   List<FlSpot> fuelPoints = [];
   double timeSec = 0;
   Timer? timer;
+  Timer? _tripTimer;
+  final List<List<dynamic>> _samples = []; // time,rpm,map,iatK,fuel
 
   // Config
   double volEff = 85, engDisp = 2.0;
@@ -132,59 +134,74 @@ class _TripHomePageState extends State<TripHomePage> {
   }
 
   void startTrip() {
-  _obdService.startListening((data) {
-    setState(() {
-      _obdData = data;
+    fuelPoints.clear();
+    _samples.clear();
+    timeSec = 0;
 
-      // Expect "PID: VALUE"
+    _obdService.startListening((data) {
       final parts = data.split(':');
       if (parts.length != 2) return;
 
       final pid = parts[0].trim();
-      final valueStr = parts[1].trim();
-      final val = double.tryParse(valueStr);
+      final val = double.tryParse(parts[1].trim());
       if (val == null) return;
 
-      switch (pid) {
-        case '01 0C': // RPM
-          rpm = val;
-          break;
-        case '01 0B': // MAP (kPa)
-          mapKpa = val;
-          break;
-        case '01 0F': // IAT (°C) -> K
-          iatK = val + 273.15;
-          break;
-      }
-
-      // eqRatio stays at 1.0 for now (stoichiometric)
-      // fuel = calcFuel(rpm, mapKpa, iatK, eqRatio);
-      fuel = _obdService.obd2.fFuel(rpm,mapKpa,iatK);
-      timeSec += 1;
-      fuelPoints.add(FlSpot(timeSec, fuel));
-      if (fuelPoints.length > 600) {
-        fuelPoints.removeAt(0);
-      }
+      setState(() {
+        switch (pid) {
+          case '01 0C':
+            rpm = val;
+            break;
+          case '01 0B':
+            mapKpa = val;
+            break;
+          case '01 0F':
+            iatK = (val + 273.15); // if you want Kelvin
+            break;
+        }
+      });
     });
-  });
-}
+
+    _tripTimer?.cancel();
+    _tripTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      setState(() {
+        timeSec += 1;
+
+        fuel = _obdService.obd2.fFuel(rpm, mapKpa, iatK);
+
+        fuelPoints.add(FlSpot(timeSec, fuel));
+        _samples.add([timeSec, rpm, mapKpa, iatK, fuel]);
+
+        if (fuelPoints.length > 600) fuelPoints.removeAt(0);
+      });
+    });
+  }
 
 
   void stopTrip() async {
-    _obdService.stopListening(obdDevice);
+    _tripTimer?.cancel();
+    _tripTimer = null;
+
+    _obdService.stopListening(obdDevice!);
     setState(() => connected = false);
+
     await saveCsv();
   }
+
 
   Future<void> saveCsv() async {
     final dir = await getApplicationDocumentsDirectory();
     final file =
         File('${dir.path}/trip_${DateTime.now().millisecondsSinceEpoch}.csv');
+    // final data = [
+    //   ['Time (s)', 'RPM', 'MAP (kPa)', 'IAT (K)', 'Fuel (mL/s)'],
+    //   for (final p in fuelPoints)
+    //     [p.x, rpm.toStringAsFixed(0), mapKpa, iatK, p.y.toStringAsFixed(3)]
+    // ];
     final data = [
       ['Time (s)', 'RPM', 'MAP (kPa)', 'IAT (K)', 'Fuel (mL/s)'],
-      for (final p in fuelPoints)
-        [p.x, rpm.toStringAsFixed(0), mapKpa, iatK, p.y.toStringAsFixed(3)]
+      ..._samples,
     ];
+
     await file.writeAsString(const ListToCsvConverter().convert(data));
     debugPrint("this is data $data");
     if (file.isAbsolute) {

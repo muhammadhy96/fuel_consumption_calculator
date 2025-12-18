@@ -4,8 +4,13 @@ import 'package:obd2_plugin/obd2_plugin.dart';
 
 class ObdService {
   final Obd2Plugin obd2 = Obd2Plugin();
-  StreamSubscription? _dataSubscription;
+
   Function(String)? onDataReceived;
+
+  Timer? _pollTimer;
+  bool _listenerReady = false;
+
+  late final String _paramJson;
 
   Future<List<BluetoothDevice>> getPairedDevices() async {
     await FlutterBluetoothSerial.instance.requestEnable();
@@ -15,14 +20,25 @@ class ObdService {
   Future<void> connect(BluetoothDevice device) async {
     await obd2.getConnection(
       device,
-      (connection) async {
+          (connection) async {
         print('Connected to ${device.address}');
-        await _initObd();
+        await _ensureListener();
+        await _initObd(); // prepares config + stores _paramJson
       },
-      (err) {
-        print("Error: $err");
-      },
+          (err) => print("Error: $err"),
     );
+  }
+
+  Future<void> _ensureListener() async {
+    if (_listenerReady) return;
+
+    await obd2.setOnDataReceived((command, response, requestCode) {
+      // This is what your UI expects: "PID: VALUE"
+      onDataReceived?.call('$command: $response');
+      print("$command => $response");
+    });
+
+    _listenerReady = true;
   }
 
   Future<void> _initObd() async {
@@ -36,7 +52,7 @@ class ObdService {
       { "command": "01 00",  "description": "", "status": true }
     ]''';
 
-    const String paramJson = '''[
+    _paramJson = '''[
       {
         "PID": "01 0C",
         "length": 2,
@@ -63,30 +79,30 @@ class ObdService {
       }
     ]''';
 
-    final waitMs = await obd2.configObdWithJSON(configJson,);
-
+    final waitMs = await obd2.configObdWithJSON(configJson);
     await Future.delayed(Duration(milliseconds: waitMs));
-    await obd2.getParamsFromJSON(paramJson);
   }
 
-void startListening(Function(String) onData) async {
-  onDataReceived = onData;
+  /// Call this when trip starts
+  Future<void> startListening(Function(String) onData) async {
+    onDataReceived = onData;
+    await _ensureListener();
 
-  final alreadyInit = await obd2.isListenToDataInitialed;
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
+      final connected = await obd2.hasConnection;
+      if (!connected) return;
 
-  if (!alreadyInit) {
-    await obd2.setOnDataReceived(
-      (command, response, requestCode) {
-        onDataReceived?.call('$command: $response');
-        print("$command => $response");
-      },
-    );
+      // This triggers responses for the PIDs above (then setOnDataReceived fires)
+      await obd2.getParamsFromJSON(_paramJson);
+    });
   }
-}
 
-  void stopListening(device) {
-    _dataSubscription?.cancel();
+  /// Call this when trip stops
+  void stopListening(BluetoothDevice device) {
+    _pollTimer?.cancel();
+    _pollTimer = null;
+
     obd2.unpairWithDevice(device);
-    _dataSubscription = null;
   }
 }
