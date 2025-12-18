@@ -30,18 +30,14 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_blue_plus: ^1.30.0
   fl_chart: ^0.70.0
   path_provider: ^2.1.3
   csv: ^6.0.0
   permission_handler: ^11.3.1
   obd2_plugin:
     git:
-      url: https://github.com/begaz/OBDII.git
+      url: https://github.com/muhammadhy96/OBDII.git
       ref: main
-
-
-
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8

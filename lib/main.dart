@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'dart:async';
 import 'dart:io';
@@ -34,6 +34,9 @@ class _TripHomePageState extends State<TripHomePage> {
   final ObdService _obdService = ObdService();
   List<BluetoothDevice> _pairedDevices = [];
   String _obdData = '';
+  bool connected = false;
+  BluetoothDevice? obdDevice;
+  StreamSubscription? scanSub;
   Future<void> _getPairedDevices() async {
     final devices = await _obdService.getPairedDevices();
     setState(() {
@@ -51,6 +54,26 @@ class _TripHomePageState extends State<TripHomePage> {
   double volEff = 85, engDisp = 2.0;
 
   // --- FUEL FORMULA ---
+  double calcFuel(double rpm, double mapKpa, double iatK, double eqRatio) {
+    if (iatK <= 0) return 0; // Avoid division by zero or invalid temp
+
+    // MAF (Mass Air Flow) calculation using the speed-density equation.
+    // MAF (g/s) = (RPM * MAP[kPa] * VolumetricEfficiency[%] * EngineDisplacement[L]) / (IntakeAirTemp[K] * Constant)
+    // The constant depends on the gas constant for air and unit conversions.
+    // A commonly used derived constant for these units is ~3444
+    final double maf = (rpm * mapKpa * volEff * engDisp) / (iatK * 3444);
+
+    // Air-to-Fuel Ratio (AFR) for gasoline is approximately 14.7
+    const double afr = 14.7;
+    final double fuelGramsPerSec = maf / (afr * eqRatio);
+
+    // Density of gasoline is approximately 0.74 g/mL
+    const double fuelDensity = 0.74;
+    final double fuelMlPerSec = fuelGramsPerSec / fuelDensity;
+
+    return fuelMlPerSec;
+  }
+
   Future<void> _showDeviceSelectionDialog() async {
     await _getPairedDevices();
     if (!mounted) return;
@@ -66,8 +89,8 @@ class _TripHomePageState extends State<TripHomePage> {
               itemBuilder: (context, index) {
                 final device = _pairedDevices[index];
                 return ListTile(
-                  title: Text(device.name),
-                  subtitle: Text(device.id.toString()),
+                  title: Text(device.name ?? "Unknown"),
+                  subtitle: Text(device.address),
                   onTap: () async {
                     Navigator.of(context).pop();
                     await _obdService.connect(device);
@@ -109,31 +132,46 @@ class _TripHomePageState extends State<TripHomePage> {
   }
 
   void startTrip() {
-    _obdService.startListening((data) {
-      setState(() {
-        _obdData = data;
-        // Assuming data format is "PID: VALUE"
-        final parts = data.split(':');
-        if (parts.length == 2) {
-          final pid = parts[0].trim();
-          final value = parts[1].trim();
-          if (pid == '010C') { // RPM
-            rpm = double.tryParse(value) ?? rpm;
-          }
-          // TODO: Add more PID parsing for other values like MAP, IAT, etc.
+  _obdService.startListening((data) {
+    setState(() {
+      _obdData = data;
 
-          fuel = calcFuel(rpm, mapKpa, iatK, eqRatio);
-          timeSec += 1;
-          fuelPoints.add(FlSpot(timeSec, fuel));
-          if (fuelPoints.length > 60) fuelPoints.removeAt(0);
-        }
-      });
+      // Expect "PID: VALUE"
+      final parts = data.split(':');
+      if (parts.length != 2) return;
+
+      final pid = parts[0].trim();
+      final valueStr = parts[1].trim();
+      final val = double.tryParse(valueStr);
+      if (val == null) return;
+
+      switch (pid) {
+        case '01 0C': // RPM
+          rpm = val;
+          break;
+        case '01 0B': // MAP (kPa)
+          mapKpa = val;
+          break;
+        case '01 0F': // IAT (°C) -> K
+          iatK = val + 273.15;
+          break;
+      }
+
+      // eqRatio stays at 1.0 for now (stoichiometric)
+      // fuel = calcFuel(rpm, mapKpa, iatK, eqRatio);
+      fuel = _obdService.obd2.fFuel(rpm,mapKpa,iatK);
+      timeSec += 1;
+      fuelPoints.add(FlSpot(timeSec, fuel));
+      if (fuelPoints.length > 600) {
+        fuelPoints.removeAt(0);
+      }
     });
-  }
+  });
+}
+
 
   void stopTrip() async {
-    _obdService.stopListening();
-    if (obdDevice != null) await obdDevice!.disconnect();
+    _obdService.stopListening(obdDevice);
     setState(() => connected = false);
     await saveCsv();
   }
@@ -148,6 +186,16 @@ class _TripHomePageState extends State<TripHomePage> {
         [p.x, rpm.toStringAsFixed(0), mapKpa, iatK, p.y.toStringAsFixed(3)]
     ];
     await file.writeAsString(const ListToCsvConverter().convert(data));
+    debugPrint("this is data $data");
+    if (file.isAbsolute) {
+      debugPrint("This is path ${file.path} isAbsolute ");
+    }
+    else{
+      debugPrint("This is path ${file.path} is not Absolute");
+    }
+    if (file.existsSync()){
+      debugPrint("This is path ${file.path} is exists");
+    }
     if (mounted) {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('Trip saved: ${file.path}')));
@@ -222,6 +270,18 @@ class _TripHomePageState extends State<TripHomePage> {
                 ),
               ],
             ),
+            const SizedBox(height: 10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text('RPM: ${rpm.toStringAsFixed(0)}'),
+                Text('MAP: ${mapKpa.toStringAsFixed(0)} kPa'),
+                Text('IAT: ${iatK > 0 ? (iatK - 273.15).toStringAsFixed(0) : '--'} °C'),
+                Text('Fuel: ${fuel.toStringAsFixed(2)} mL/s'),
+              ],
+            ),
+            const SizedBox(height: 10),
+
           ],
         ),
       ),

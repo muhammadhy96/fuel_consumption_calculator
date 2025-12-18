@@ -19,17 +19,6 @@ subprojects {
     project.evaluationDependsOn(":app")
 }
 
-subprojects {
-    afterEvaluate {
-        if (project.plugins.hasPlugin("com.android.library")) {
-            android {
-                if (namespace == null) {
-                    namespace = (project.group as String)
-                }
-            }
-        }
-    }
-}
 
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
