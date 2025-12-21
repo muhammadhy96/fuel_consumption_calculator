@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 
@@ -72,31 +74,110 @@ class ObdProvider extends ChangeNotifier {
   }
 
   double calculateFuelFlow() {
-    if (!_connected || iatKelvin <= 0) return 0;
-    return _obdService.fuelFlow(rpm, mapKpa, iatKelvin);
+    if (!_connected) return 0;
+    final iat = iatKelvin > 0 ? iatKelvin : 293.15;
+    return _obdService.fuelFlow(rpm, mapKpa, iat);
   }
 
   void _handleObdData(String data) {
     final parts = data.split(':');
     if (parts.length != 2) return;
     final pid = parts[0].trim();
-    final value = double.tryParse(parts[1].trim());
-    if (value == null) return;
+    final payload = parts[1].trim();
 
     lastRawMessage = data;
     lastUpdate = DateTime.now();
 
+    if (pid.toUpperCase() == 'PARAMETER') {
+      _handleBatchPayload(payload);
+      notifyListeners();
+      return;
+    }
+
+    final numeric = _parseFirstNumber(payload);
+    final bytes = numeric == null ? _parseHexBytes(payload) : const <int>[];
+    int dataStart = 0;
+    if (bytes.length >= 2 && bytes[0] == 0x41) {
+      dataStart = 2;
+    }
+
     switch (pid) {
       case '01 0C':
-        rpm = value;
+        if (numeric != null) {
+          rpm = numeric;
+        } else if (bytes.length >= dataStart + 2) {
+          rpm = ((bytes[dataStart] * 256) + bytes[dataStart + 1]) / 4;
+        }
         break;
       case '01 0B':
-        mapKpa = value;
+        if (numeric != null) {
+          mapKpa = numeric;
+        } else if (bytes.length > dataStart) {
+          mapKpa = bytes[dataStart].toDouble();
+        }
         break;
       case '01 0F':
-        iatKelvin = value + 273.15;
+        double? celsius;
+        if (numeric != null) {
+          celsius = numeric;
+        } else if (bytes.length > dataStart) {
+          celsius = bytes[dataStart] - 40;
+        }
+        if (celsius != null) {
+          iatKelvin = celsius + 273.15;
+        }
         break;
     }
     notifyListeners();
+  }
+
+  void _handleBatchPayload(String payload) {
+    try {
+      final decoded = jsonDecode(payload);
+      if (decoded is! List) return;
+      for (final item in decoded) {
+        if (item is! Map) continue;
+        final pid = (item['PID'] as String?)?.trim();
+        final response = (item['response'] as String?)?.trim();
+        if (pid == null || response == null || response.isEmpty) continue;
+        _updatePidValue(pid, response);
+      }
+    } catch (_) {
+      // Ignore malformed payloads.
+    }
+  }
+
+  void _updatePidValue(String pid, String response) {
+    final numeric = _parseFirstNumber(response);
+    if (numeric == null) return;
+    switch (pid) {
+      case '01 0C':
+        rpm = numeric;
+        break;
+      case '01 0B':
+        mapKpa = numeric;
+        break;
+      case '01 0F':
+        iatKelvin = numeric + 273.15;
+        break;
+    }
+  }
+
+  List<int> _parseHexBytes(String raw) {
+    final tokens = raw.trim().split(RegExp(r'\\s+'));
+    final bytes = <int>[];
+    for (final token in tokens) {
+      final cleaned = token.replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
+      if (cleaned.isEmpty) continue;
+      final value = int.tryParse(cleaned, radix: 16);
+      if (value != null) bytes.add(value);
+    }
+    return bytes;
+  }
+
+  double? _parseFirstNumber(String raw) {
+    final match = RegExp(r'-?\\d+(?:\\.\\d+)?').firstMatch(raw);
+    if (match == null) return null;
+    return double.tryParse(match.group(0) ?? '');
   }
 }

@@ -32,6 +32,7 @@ class _DrivePageState extends State<DrivePage> {
   @override
   void dispose() {
     _sampleTimer?.cancel();
+    context.read<ObdProvider>().stopLive();
     super.dispose();
   }
 
@@ -77,19 +78,29 @@ class _DrivePageState extends State<DrivePage> {
       ),
     );
     if (device == null) return false;
-    await obd.connect(device);
-    final sample = await obd.verifyConnection();
-    if (mounted) {
-      final messenger = ScaffoldMessenger.of(context);
-      messenger.showSnackBar(SnackBar(
-        content: Text(
-          sample != null
-              ? 'OBD data received: $sample'
-              : 'Connected to ${device.name ?? 'device'}, waiting for data...',
-        ),
-      ));
+    try {
+      await obd.connect(device);
+      await obd.startLive();
+      final sample = await obd.verifyConnection();
+      if (mounted) {
+        final messenger = ScaffoldMessenger.of(context);
+        messenger.showSnackBar(SnackBar(
+          content: Text(
+            sample != null
+                ? 'OBD data received: $sample'
+                : 'Connected to ${device.name ?? 'device'}, waiting for data...',
+          ),
+        ));
+      }
+      return true;
+    } catch (err) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Failed to initialize OBD: $err'),
+        ));
+      }
+      return false;
     }
-    return true;
   }
 
   Future<void> _startTrip() async {
