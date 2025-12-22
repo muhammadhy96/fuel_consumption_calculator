@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 
@@ -80,16 +81,28 @@ class ObdProvider extends ChangeNotifier {
   }
 
   void _handleObdData(String data) {
-    final parts = data.split(':');
-    if (parts.length != 2) return;
-    final pid = parts[0].trim();
-    final payload = parts[1].trim();
+    _log('RAW $data');
+    final splitIndex = data.indexOf(':');
+    if (splitIndex == -1) {
+      _handleRawPayload(data.trim());
+      notifyListeners();
+      return;
+    }
+    final pid = data.substring(0, splitIndex).trim();
+    final payload = data.substring(splitIndex + 1).trim();
 
     lastRawMessage = data;
     lastUpdate = DateTime.now();
 
+    if (pid.isEmpty || pid.toUpperCase() == 'RAW') {
+      _handleRawPayload(payload);
+      notifyListeners();
+      return;
+    }
+
     if (pid.toUpperCase() == 'PARAMETER') {
       _handleBatchPayload(payload);
+      _log('PARSED batch rpm=$rpm map=$mapKpa iatK=$iatKelvin');
       notifyListeners();
       return;
     }
@@ -108,6 +121,7 @@ class ObdProvider extends ChangeNotifier {
         } else if (bytes.length >= dataStart + 2) {
           rpm = ((bytes[dataStart] * 256) + bytes[dataStart + 1]) / 4;
         }
+        _log('PARSED rpm=$rpm');
         break;
       case '01 0B':
         if (numeric != null) {
@@ -115,6 +129,7 @@ class ObdProvider extends ChangeNotifier {
         } else if (bytes.length > dataStart) {
           mapKpa = bytes[dataStart].toDouble();
         }
+        _log('PARSED map=$mapKpa');
         break;
       case '01 0F':
         double? celsius;
@@ -126,9 +141,43 @@ class ObdProvider extends ChangeNotifier {
         if (celsius != null) {
           iatKelvin = celsius + 273.15;
         }
+        _log('PARSED iatK=$iatKelvin');
         break;
     }
     notifyListeners();
+  }
+
+  void _handleRawPayload(String payload) {
+    if (payload.isEmpty) return;
+    final bytes = _parseHexBytes(payload);
+    if (bytes.length >= 2 && bytes[0] == 0x41) {
+      final pidByte = bytes[1];
+      switch (pidByte) {
+        case 0x0C:
+          if (bytes.length >= 4) {
+            rpm = ((bytes[2] * 256) + bytes[3]) / 4;
+            _log('RAW rpm=$rpm');
+          }
+          break;
+        case 0x0B:
+          if (bytes.length >= 3) {
+            mapKpa = bytes[2].toDouble();
+            _log('RAW map=$mapKpa');
+          }
+          break;
+        case 0x0F:
+          if (bytes.length >= 3) {
+            iatKelvin = (bytes[2] - 40) + 273.15;
+            _log('RAW iatK=$iatKelvin');
+          }
+          break;
+      }
+    } else {
+      final numeric = _parseFirstNumber(payload);
+      if (numeric != null) {
+        _log('RAW numeric=$numeric');
+      }
+    }
   }
 
   void _handleBatchPayload(String payload) {
@@ -161,23 +210,39 @@ class ObdProvider extends ChangeNotifier {
         iatKelvin = numeric + 273.15;
         break;
     }
+    _log('PID $pid response=$response => rpm=$rpm map=$mapKpa iatK=$iatKelvin');
   }
 
   List<int> _parseHexBytes(String raw) {
-    final tokens = raw.trim().split(RegExp(r'\\s+'));
+    final cleaned = raw.replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
     final bytes = <int>[];
+    if (cleaned.length >= 2) {
+      for (var i = 0; i + 1 < cleaned.length; i += 2) {
+        final pair = cleaned.substring(i, i + 2);
+        final value = int.tryParse(pair, radix: 16);
+        if (value != null) bytes.add(value);
+      }
+      if (bytes.isNotEmpty) return bytes;
+    }
+
+    final tokens = raw.trim().split(RegExp(r'\s+'));
     for (final token in tokens) {
-      final cleaned = token.replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
-      if (cleaned.isEmpty) continue;
-      final value = int.tryParse(cleaned, radix: 16);
+      final tokenCleaned = token.replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
+      if (tokenCleaned.isEmpty) continue;
+      final value = int.tryParse(tokenCleaned, radix: 16);
       if (value != null) bytes.add(value);
     }
     return bytes;
   }
 
   double? _parseFirstNumber(String raw) {
-    final match = RegExp(r'-?\\d+(?:\\.\\d+)?').firstMatch(raw);
+    final match = RegExp(r'-?\d+(?:\.\d+)?').firstMatch(raw);
     if (match == null) return null;
     return double.tryParse(match.group(0) ?? '');
+  }
+
+  void _log(String message) {
+    final timestamp = DateTime.now().toIso8601String();
+    debugPrint('[OBD_PROVIDER][$timestamp] $message');
   }
 }
