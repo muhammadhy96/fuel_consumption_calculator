@@ -57,7 +57,8 @@ class _TripCard extends StatelessWidget {
           children: [
             Text(formatFuel(trip.totalFuelMl),
                 style: const TextStyle(fontWeight: FontWeight.bold)),
-            Text('${trip.avgFuelMlPerSec.toStringAsFixed(2)} mL/s'),
+            Text(formatDistance(trip.distanceKm)),
+            Text(formatConsumption(trip.avgConsumptionLPer100Km)),
           ],
         ),
         onTap: () => Navigator.of(context).push(

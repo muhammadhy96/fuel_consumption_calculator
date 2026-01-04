@@ -7,6 +7,8 @@ class Trip {
     required this.durationSeconds,
     required this.totalFuelMl,
     required this.avgFuelMlPerSec,
+    this.distanceKm = 0,
+    this.avgConsumptionLPer100Km = 0,
     this.dataFilePath,
   });
 
@@ -17,6 +19,8 @@ class Trip {
   final int durationSeconds;
   final double totalFuelMl;
   final double avgFuelMlPerSec;
+  final double distanceKm;
+  final double avgConsumptionLPer100Km;
   final String? dataFilePath;
 
   double get totalFuelLiters => totalFuelMl / 1000;
@@ -30,6 +34,8 @@ class Trip {
       'durationSeconds': durationSeconds,
       'totalFuelMl': totalFuelMl,
       'avgFuelMlPerSec': avgFuelMlPerSec,
+      'distanceKm': distanceKm,
+      'avgConsumptionLPer100Km': avgConsumptionLPer100Km,
       'dataFilePath': dataFilePath,
     };
   }
@@ -45,6 +51,9 @@ class Trip {
       durationSeconds: map['durationSeconds'] as int? ?? 0,
       totalFuelMl: (map['totalFuelMl'] as num?)?.toDouble() ?? 0,
       avgFuelMlPerSec: (map['avgFuelMlPerSec'] as num?)?.toDouble() ?? 0,
+      distanceKm: (map['distanceKm'] as num?)?.toDouble() ?? 0,
+      avgConsumptionLPer100Km:
+          (map['avgConsumptionLPer100Km'] as num?)?.toDouble() ?? 0,
       dataFilePath: map['dataFilePath'] as String?,
     );
   }

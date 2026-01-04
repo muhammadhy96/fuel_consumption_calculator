@@ -95,9 +95,47 @@ class ObdService {
     obd2.unpairWithDevice(device);
   }
 
-  double fuelFlow(double rpm, double mapKpa, double iatKelvin) {
-    if (iatKelvin <= 0) return 0;
-    return obd2.fFuel(rpm, mapKpa, iatKelvin);
+  double fuelFlow(
+    double rpm,
+    double mapKpa,
+    double iatKelvin, {
+    required double volumetricEfficiency,
+    required double engineDisplacementLiters,
+    double equivRatio = 1.0,
+    double? mafGramsPerSec,
+  }) {
+    if (rpm <= 0) return 0;
+    final actualAfr = 14.7 * (equivRatio <= 0 ? 1.0 : equivRatio);
+
+    final gramsOfAir = mafGramsPerSec ??
+        _calcGramsOfAir(
+          rpm: rpm,
+          mapKpa: mapKpa,
+          iatKelvin: iatKelvin,
+          volumetricEfficiency: volumetricEfficiency,
+          engineDisplacementLiters: engineDisplacementLiters,
+        );
+    final gramsOfFuel = gramsOfAir / actualAfr;
+    return (gramsOfFuel / 745) * 1000;
+  }
+
+  double _calcGramsOfAir({
+    required double rpm,
+    required double mapKpa,
+    required double iatKelvin,
+    required double volumetricEfficiency,
+    required double engineDisplacementLiters,
+  }) {
+    if (iatKelvin <= 0 || mapKpa <= 0) return 0;
+    const double molarMassAir = 28.97; // g/mol
+    const double gasConstant = 8.314; // kPa*L/(mol*K)
+    final imap = (rpm * mapKpa) / (iatKelvin * 2);
+    final gramsOfAir = (imap / 60) *
+        (volumetricEfficiency / 100) *
+        engineDisplacementLiters *
+        molarMassAir /
+        gasConstant;
+    return gramsOfAir;
   }
 
   Future<String?> requestSingleFrame(

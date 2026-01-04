@@ -26,6 +26,30 @@ const String obdParamConfig = '''[
     "status": true
   },
   {
+    "PID": "01 10",
+    "length": 2,
+    "title": "MAF",
+    "unit": "g/s",
+    "description": "<double>, (( [0] * 256) + [1] ) / 100",
+    "status": true
+  },
+  {
+    "PID": "01 44",
+    "length": 2,
+    "title": "Commanded Equivalence Ratio",
+    "unit": "ratio",
+    "description": "<double>, (( [0] * 256) + [1] ) / 32768",
+    "status": true
+  },
+  {
+    "PID": "01 0D",
+    "length": 1,
+    "title": "Vehicle Speed",
+    "unit": "km/h",
+    "description": "<int>, [0]",
+    "status": true
+  },
+  {
     "PID": "01 0F",
     "length": 1,
     "title": "IAT",

@@ -85,6 +85,18 @@ class LiveDashboard extends StatelessWidget {
               value: '${obd.mapKpa.toStringAsFixed(0)} kPa',
             ),
             ValueCard(
+              label: 'MAF',
+              value: '${obd.mafGramsPerSec.toStringAsFixed(1)} g/s',
+            ),
+            ValueCard(
+              label: 'Eq Ratio',
+              value: obd.equivRatio.toStringAsFixed(2),
+            ),
+            ValueCard(
+              label: 'Speed',
+              value: '${obd.speedKph.toStringAsFixed(0)} km/h',
+            ),
+            ValueCard(
               label: 'IAT',
               value: obd.iatKelvin > 0
                   ? '${(obd.iatKelvin - 273.15).toStringAsFixed(0)} °C'

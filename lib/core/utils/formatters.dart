@@ -21,3 +21,10 @@ String formatTimestamp(DateTime timestamp) {
   final seconds = timestamp.second.toString().padLeft(2, '0');
   return '$hours:$minutes:$seconds';
 }
+
+String formatDistance(double km) => '${km.toStringAsFixed(2)} km';
+
+String formatConsumption(double litersPer100Km) {
+  if (litersPer100Km <= 0) return '--';
+  return '${litersPer100Km.toStringAsFixed(2)} L/100km';
+}

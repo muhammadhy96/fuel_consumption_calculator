@@ -34,6 +34,10 @@ class TripSummaryPage extends StatelessWidget {
               children: [
                 _Stat(label: 'Duration', value: formatDuration(trip.durationSeconds)),
                 _Stat(label: 'Fuel used', value: formatFuel(trip.totalFuelMl)),
+                _Stat(label: 'Distance', value: formatDistance(trip.distanceKm)),
+                _Stat(
+                    label: 'Avg consumption',
+                    value: formatConsumption(trip.avgConsumptionLPer100Km)),
                 _Stat(
                     label: 'Avg flow',
                     value: '${trip.avgFuelMlPerSec.toStringAsFixed(2)} mL/s'),

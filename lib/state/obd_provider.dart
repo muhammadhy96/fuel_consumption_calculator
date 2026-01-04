@@ -17,6 +17,9 @@ class ObdProvider extends ChangeNotifier {
 
   double rpm = 0;
   double mapKpa = 0;
+  double speedKph = 0;
+  double mafGramsPerSec = 0;
+  double equivRatio = 1.0;
   double iatKelvin = 0;
   String? lastRawMessage;
   DateTime? lastUpdate;
@@ -61,6 +64,9 @@ class ObdProvider extends ChangeNotifier {
     _live = false;
     rpm = 0;
     mapKpa = 0;
+    speedKph = 0;
+    mafGramsPerSec = 0;
+    equivRatio = 1.0;
     iatKelvin = 0;
     notifyListeners();
   }
@@ -74,10 +80,23 @@ class ObdProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  double calculateFuelFlow() {
+  double calculateFuelFlow({
+    required double volumetricEfficiency,
+    required double engineDisplacementLiters,
+    double equivRatio = 1.0,
+  }) {
     if (!_connected) return 0;
     final iat = iatKelvin > 0 ? iatKelvin : 293.15;
-    return _obdService.fuelFlow(rpm, mapKpa, iat);
+    final maf = mafGramsPerSec > 0 ? mafGramsPerSec : null;
+    return _obdService.fuelFlow(
+      rpm,
+      mapKpa,
+      iat,
+      volumetricEfficiency: volumetricEfficiency,
+      engineDisplacementLiters: engineDisplacementLiters,
+      equivRatio: equivRatio,
+      mafGramsPerSec: maf,
+    );
   }
 
   void _handleObdData(String data) {
@@ -131,6 +150,30 @@ class ObdProvider extends ChangeNotifier {
         }
         _log('PARSED map=$mapKpa');
         break;
+      case '01 10':
+        if (numeric != null) {
+          mafGramsPerSec = numeric;
+        } else if (bytes.length >= dataStart + 2) {
+          mafGramsPerSec = ((bytes[dataStart] * 256) + bytes[dataStart + 1]) / 100;
+        }
+        _log('PARSED maf=$mafGramsPerSec');
+        break;
+      case '01 44':
+        if (numeric != null) {
+          equivRatio = numeric;
+        } else if (bytes.length >= dataStart + 2) {
+          equivRatio = ((bytes[dataStart] * 256) + bytes[dataStart + 1]) / 32768;
+        }
+        _log('PARSED equivRatio=$equivRatio');
+        break;
+      case '01 0D':
+        if (numeric != null) {
+          speedKph = numeric;
+        } else if (bytes.length > dataStart) {
+          speedKph = bytes[dataStart].toDouble();
+        }
+        _log('PARSED speed=$speedKph');
+        break;
       case '01 0F':
         double? celsius;
         if (numeric != null) {
@@ -163,6 +206,24 @@ class ObdProvider extends ChangeNotifier {
           if (bytes.length >= 3) {
             mapKpa = bytes[2].toDouble();
             _log('RAW map=$mapKpa');
+          }
+          break;
+        case 0x10:
+          if (bytes.length >= 4) {
+            mafGramsPerSec = ((bytes[2] * 256) + bytes[3]) / 100;
+            _log('RAW maf=$mafGramsPerSec');
+          }
+          break;
+        case 0x44:
+          if (bytes.length >= 4) {
+            equivRatio = ((bytes[2] * 256) + bytes[3]) / 32768;
+            _log('RAW equivRatio=$equivRatio');
+          }
+          break;
+        case 0x0D:
+          if (bytes.length >= 3) {
+            speedKph = bytes[2].toDouble();
+            _log('RAW speed=$speedKph');
           }
           break;
         case 0x0F:
@@ -205,6 +266,15 @@ class ObdProvider extends ChangeNotifier {
         break;
       case '01 0B':
         mapKpa = numeric;
+        break;
+      case '01 10':
+        mafGramsPerSec = numeric;
+        break;
+      case '01 44':
+        equivRatio = numeric;
+        break;
+      case '01 0D':
+        speedKph = numeric;
         break;
       case '01 0F':
         iatKelvin = numeric + 273.15;

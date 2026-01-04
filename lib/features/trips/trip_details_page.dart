@@ -102,6 +102,10 @@ class _TripDetailsPageState extends State<TripDetailsPage> {
                 _Stat(label: 'Date', value: formatDate(trip.startTime)),
                 _Stat(label: 'Duration', value: formatDuration(trip.durationSeconds)),
                 _Stat(label: 'Fuel', value: formatFuel(trip.totalFuelMl)),
+                _Stat(label: 'Distance', value: formatDistance(trip.distanceKm)),
+                _Stat(
+                    label: 'Avg consumption',
+                    value: formatConsumption(trip.avgConsumptionLPer100Km)),
                 _Stat(
                     label: 'Avg flow',
                     value: '${trip.avgFuelMlPerSec.toStringAsFixed(2)} mL/s'),

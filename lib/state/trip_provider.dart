@@ -88,6 +88,10 @@ class TripProvider extends ChangeNotifier {
         _samples.fold<double>(0.0, (sum, sample) => sum + sample.fuelMlPerSec);
     final double avgFuel =
         _samples.isEmpty ? 0.0 : totalFuel / _samples.length;
+    final distanceKm = _calculateDistanceKm();
+    final avgConsumption = distanceKm > 0
+        ? (totalFuel / 1000) / distanceKm * 100
+        : 0.0;
 
     final csvPath = await _fileService.saveTripSamples(profileId, List.of(_samples));
 
@@ -99,6 +103,8 @@ class TripProvider extends ChangeNotifier {
       durationSeconds: duration,
       totalFuelMl: totalFuel,
       avgFuelMlPerSec: avgFuel,
+      distanceKm: distanceKm,
+      avgConsumptionLPer100Km: avgConsumption,
       dataFilePath: csvPath,
     );
 
@@ -126,5 +132,19 @@ class TripProvider extends ChangeNotifier {
 
   Future<List<TripSample>> loadSamples(String path) {
     return _fileService.loadTripSamples(path);
+  }
+
+  double _calculateDistanceKm() {
+    if (_samples.isEmpty) return 0;
+    double distance = 0;
+    double previousTime = _samples.first.timeSeconds - 1;
+    for (final sample in _samples) {
+      final dt = sample.timeSeconds - previousTime;
+      if (dt > 0) {
+        distance += (sample.speedKph * dt) / 3600;
+      }
+      previousTime = sample.timeSeconds;
+    }
+    return distance;
   }
 }

@@ -134,12 +134,16 @@ class _DrivePageState extends State<DrivePage> {
   void _collectSample(CarProfile profile) {
     final obd = context.read<ObdProvider>();
     final trip = context.read<TripProvider>();
-    final fuel = obd.calculateFuelFlow();
+    final fuel = obd.calculateFuelFlow(
+      volumetricEfficiency: profile.volumetricEfficiency,
+      engineDisplacementLiters: profile.engineDisplacement ?? 2.0,
+    );
     _timeSeconds += 1;
     final sample = TripSample(
       timeSeconds: _timeSeconds,
       rpm: obd.rpm,
       mapKpa: obd.mapKpa,
+      speedKph: obd.speedKph,
       iatKelvin: obd.iatKelvin,
       fuelMlPerSec: fuel,
     );
