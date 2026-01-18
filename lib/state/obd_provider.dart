@@ -109,17 +109,18 @@ class ObdProvider extends ChangeNotifier {
     }
     final pid = data.substring(0, splitIndex).trim();
     final payload = data.substring(splitIndex + 1).trim();
+    final normalizedPid = _normalizePid(pid);
 
     lastRawMessage = data;
     lastUpdate = DateTime.now();
 
-    if (pid.isEmpty || pid.toUpperCase() == 'RAW') {
+    if (normalizedPid.isEmpty || pid.toUpperCase() == 'RAW') {
       _handleRawPayload(payload);
       notifyListeners();
       return;
     }
 
-    if (pid.toUpperCase() == 'PARAMETER') {
+    if (normalizedPid == 'PARAMETER') {
       _handleBatchPayload(payload);
       _log('PARSED batch rpm=$rpm map=$mapKpa iatK=$iatKelvin');
       notifyListeners();
@@ -129,12 +130,14 @@ class ObdProvider extends ChangeNotifier {
     final numeric = _parseFirstNumber(payload);
     final bytes = numeric == null ? _parseHexBytes(payload) : const <int>[];
     int dataStart = 0;
-    if (bytes.length >= 2 && bytes[0] == 0x41) {
+    if (bytes.length >= 3 && bytes[0] == 0x62) {
+      dataStart = 3;
+    } else if (bytes.length >= 2 && bytes[0] == 0x41) {
       dataStart = 2;
     }
 
-    switch (pid) {
-      case '01 0C':
+    switch (normalizedPid) {
+      case '010C':
         if (numeric != null) {
           rpm = numeric;
         } else if (bytes.length >= dataStart + 2) {
@@ -142,7 +145,7 @@ class ObdProvider extends ChangeNotifier {
         }
         _log('PARSED rpm=$rpm');
         break;
-      case '01 0B':
+      case '010B':
         if (numeric != null) {
           mapKpa = numeric;
         } else if (bytes.length > dataStart) {
@@ -150,7 +153,9 @@ class ObdProvider extends ChangeNotifier {
         }
         _log('PARSED map=$mapKpa');
         break;
-      case '01 10':
+      case '0110':
+      case '220101':
+      case '2200101':
         if (numeric != null) {
           mafGramsPerSec = numeric;
         } else if (bytes.length >= dataStart + 2) {
@@ -158,7 +163,7 @@ class ObdProvider extends ChangeNotifier {
         }
         _log('PARSED maf=$mafGramsPerSec');
         break;
-      case '01 44':
+      case '0144':
         if (numeric != null) {
           equivRatio = numeric;
         } else if (bytes.length >= dataStart + 2) {
@@ -166,7 +171,7 @@ class ObdProvider extends ChangeNotifier {
         }
         _log('PARSED equivRatio=$equivRatio');
         break;
-      case '01 0D':
+      case '010D':
         if (numeric != null) {
           speedKph = numeric;
         } else if (bytes.length > dataStart) {
@@ -174,7 +179,7 @@ class ObdProvider extends ChangeNotifier {
         }
         _log('PARSED speed=$speedKph');
         break;
-      case '01 0F':
+      case '010F':
         double? celsius;
         if (numeric != null) {
           celsius = numeric;
@@ -233,6 +238,14 @@ class ObdProvider extends ChangeNotifier {
           }
           break;
       }
+    } else if (bytes.length >= 5 && bytes[0] == 0x62) {
+      final pidNormalized = '22${bytes[1].toRadixString(16).padLeft(2, '0')}'
+              '${bytes[2].toRadixString(16).padLeft(2, '0')}'
+          .toUpperCase();
+      if (pidNormalized == '220101' || pidNormalized == '2200101') {
+        mafGramsPerSec = ((bytes[3] * 256) + bytes[4]) / 100;
+        _log('RAW maf(ext)=$mafGramsPerSec');
+      }
     } else {
       final numeric = _parseFirstNumber(payload);
       if (numeric != null) {
@@ -248,9 +261,10 @@ class ObdProvider extends ChangeNotifier {
       for (final item in decoded) {
         if (item is! Map) continue;
         final pid = (item['PID'] as String?)?.trim();
+        final normalizedPid = _normalizePid(pid ?? '');
         final response = (item['response'] as String?)?.trim();
-        if (pid == null || response == null || response.isEmpty) continue;
-        _updatePidValue(pid, response);
+        if (normalizedPid.isEmpty || response == null || response.isEmpty) continue;
+        _updatePidValue(normalizedPid, response);
       }
     } catch (_) {
       // Ignore malformed payloads.
@@ -261,22 +275,24 @@ class ObdProvider extends ChangeNotifier {
     final numeric = _parseFirstNumber(response);
     if (numeric == null) return;
     switch (pid) {
-      case '01 0C':
+      case '010C':
         rpm = numeric;
         break;
-      case '01 0B':
+      case '010B':
         mapKpa = numeric;
         break;
-      case '01 10':
+      case '0110':
+      case '220101':
+      case '2200101':
         mafGramsPerSec = numeric;
         break;
-      case '01 44':
+      case '0144':
         equivRatio = numeric;
         break;
-      case '01 0D':
+      case '010D':
         speedKph = numeric;
         break;
-      case '01 0F':
+      case '010F':
         iatKelvin = numeric + 273.15;
         break;
     }
@@ -309,6 +325,10 @@ class ObdProvider extends ChangeNotifier {
     final match = RegExp(r'-?\d+(?:\.\d+)?').firstMatch(raw);
     if (match == null) return null;
     return double.tryParse(match.group(0) ?? '');
+  }
+
+  String _normalizePid(String pid) {
+    return pid.replaceAll(RegExp(r'\s+'), '').toUpperCase();
   }
 
   void _log(String message) {

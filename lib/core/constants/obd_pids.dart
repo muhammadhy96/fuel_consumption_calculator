@@ -34,6 +34,14 @@ const String obdParamConfig = '''[
     "status": true
   },
   {
+    "PID": "22 0101",
+    "length": 2,
+    "title": "MAF (extended)",
+    "unit": "g/s",
+    "description": "<double>, (( [0] * 256) + [1] ) / 100",
+    "status": true
+  },
+  {
     "PID": "01 44",
     "length": 2,
     "title": "Commanded Equivalence Ratio",
