@@ -58,11 +58,27 @@ const String obdParamConfig = '''[
     "status": true
   },
   {
+    "PID": "01 04",
+    "length": 1,
+    "title": "Calculated Engine Load",
+    "unit": "%",
+    "description": "<double>, [0] * 100 / 255",
+    "status": true
+  },
+  {
     "PID": "01 0F",
     "length": 1,
     "title": "IAT",
     "unit": "degC",
     "description": "<int>, [0] - 40",
+    "status": true
+  },
+  {
+    "PID": "01 5E",
+    "length": 2,
+    "title": "Engine Fuel Rate",
+    "unit": "L/h",
+    "description": "<double>, (( [0] * 256) + [1] ) / 20",
     "status": true
   }
 ]''';

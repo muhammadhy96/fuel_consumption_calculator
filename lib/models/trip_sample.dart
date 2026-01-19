@@ -6,6 +6,9 @@ class TripSample {
     required this.speedKph,
     required this.iatKelvin,
     required this.fuelMlPerSec,
+    required this.engineLoadPercent,
+    required this.mafGramsPerSec,
+    required this.equivRatio,
   });
 
   final double timeSeconds;
@@ -14,6 +17,9 @@ class TripSample {
   final double speedKph;
   final double iatKelvin;
   final double fuelMlPerSec;
+  final double engineLoadPercent;
+  final double mafGramsPerSec;
+  final double equivRatio;
 
   List<dynamic> toCsvRow() => [
         timeSeconds,
@@ -22,9 +28,13 @@ class TripSample {
         speedKph,
         iatKelvin,
         fuelMlPerSec,
+        engineLoadPercent,
+        mafGramsPerSec,
+        equivRatio,
       ];
 
   factory TripSample.fromCsvRow(List<dynamic> row) {
+    final hasExtended = row.length >= 9;
     final hasSpeed = row.length >= 6;
     final double speed = hasSpeed ? (row[3] as num).toDouble() : 0.0;
     final iatIndex = hasSpeed ? 4 : 3;
@@ -36,6 +46,9 @@ class TripSample {
       speedKph: speed,
       iatKelvin: (row[iatIndex] as num).toDouble(),
       fuelMlPerSec: (row[fuelIndex] as num).toDouble(),
+      engineLoadPercent: hasExtended ? (row[6] as num).toDouble() : 0.0,
+      mafGramsPerSec: hasExtended ? (row[7] as num).toDouble() : 0.0,
+      equivRatio: hasExtended ? (row[8] as num).toDouble() : 1.0,
     );
   }
 }

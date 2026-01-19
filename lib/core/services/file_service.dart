@@ -47,7 +47,17 @@ class FileService {
         '${profileId}_trip_${DateTime.now().millisecondsSinceEpoch}.csv';
     final file = File(p.join(exportDir.path, fileName));
     final rows = [
-      ['Time (s)', 'RPM', 'MAP (kPa)', 'Speed (km/h)', 'IAT (K)', 'Fuel (mL/s)'],
+      [
+        'Time (s)',
+        'RPM',
+        'MAP (kPa)',
+        'Speed (km/h)',
+        'IAT (K)',
+        'Fuel (mL/s)',
+        'Engine Load (%)',
+        'MAF (g/s)',
+        'Eq Ratio'
+      ],
       ...samples.map((s) => s.toCsvRow()),
     ];
     await file.writeAsString(const ListToCsvConverter().convert(rows));

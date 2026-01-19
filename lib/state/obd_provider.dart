@@ -14,6 +14,7 @@ class ObdProvider extends ChangeNotifier {
   BluetoothDevice? _connectedDevice;
   bool _connected = false;
   bool _live = false;
+  VoidCallback? onFrame;
 
   double rpm = 0;
   double mapKpa = 0;
@@ -21,8 +22,11 @@ class ObdProvider extends ChangeNotifier {
   double mafGramsPerSec = 0;
   double equivRatio = 1.0;
   double iatKelvin = 0;
+  double? engineLoadPercent;
+  double? fuelRateMlPerSecDirect;
   String? lastRawMessage;
   DateTime? lastUpdate;
+  DateTime? _lastLogTime;
 
   BluetoothDevice? get device => _connectedDevice;
   bool get connected => _connected;
@@ -42,12 +46,13 @@ class ObdProvider extends ChangeNotifier {
   Future<String?> verifyConnection() async {
     if (!_connected) return null;
     final sample = await _obdService.requestSingleFrame();
-    if (sample != null) {
+    if (sample != null && !sample.toUpperCase().contains('STOPPED')) {
       lastRawMessage = sample;
       lastUpdate = DateTime.now();
       notifyListeners();
+      return sample;
     }
-    return sample;
+    return null;
   }
 
   Future<void> startLive() async {
@@ -57,9 +62,9 @@ class ObdProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  void stopLive() {
+  Future<void> stopLive() async {
     if (_connectedDevice != null) {
-      _obdService.stopListening(_connectedDevice!);
+      await _obdService.stopListening(_connectedDevice!);
     }
     _live = false;
     rpm = 0;
@@ -68,11 +73,14 @@ class ObdProvider extends ChangeNotifier {
     mafGramsPerSec = 0;
     equivRatio = 1.0;
     iatKelvin = 0;
+    engineLoadPercent = null;
+    fuelRateMlPerSecDirect = null;
+    onFrame = null;
     notifyListeners();
   }
 
-  void disconnect() {
-    stopLive();
+  Future<void> disconnect() async {
+    await stopLive();
     _connectedDevice = null;
     _connected = false;
     lastRawMessage = null;
@@ -85,14 +93,18 @@ class ObdProvider extends ChangeNotifier {
     required double engineDisplacementLiters,
     double equivRatio = 1.0,
   }) {
+    if (fuelRateMlPerSecDirect != null && fuelRateMlPerSecDirect! > 0) {
+      return fuelRateMlPerSecDirect!;
+    }
     if (!_connected) return 0;
+    final vePercent = engineLoadPercent ?? volumetricEfficiency;
     final iat = iatKelvin > 0 ? iatKelvin : 293.15;
     final maf = mafGramsPerSec > 0 ? mafGramsPerSec : null;
     return _obdService.fuelFlow(
       rpm,
       mapKpa,
       iat,
-      volumetricEfficiency: volumetricEfficiency,
+      volumetricEfficiency: vePercent,
       engineDisplacementLiters: engineDisplacementLiters,
       equivRatio: equivRatio,
       mafGramsPerSec: maf,
@@ -100,6 +112,12 @@ class ObdProvider extends ChangeNotifier {
   }
 
   void _handleObdData(String data) {
+    final trimmed = data.trim();
+    if (trimmed.toUpperCase() == 'STOPPED') {
+      _log('IGNORED STOPPED frame');
+      return;
+    }
+    if (trimmed.isEmpty) return;
     _log('RAW $data');
     final splitIndex = data.indexOf(':');
     if (splitIndex == -1) {
@@ -117,6 +135,7 @@ class ObdProvider extends ChangeNotifier {
     if (normalizedPid.isEmpty || pid.toUpperCase() == 'RAW') {
       _handleRawPayload(payload);
       notifyListeners();
+      onFrame?.call();
       return;
     }
 
@@ -124,6 +143,7 @@ class ObdProvider extends ChangeNotifier {
       _handleBatchPayload(payload);
       _log('PARSED batch rpm=$rpm map=$mapKpa iatK=$iatKelvin');
       notifyListeners();
+      onFrame?.call();
       return;
     }
 
@@ -179,6 +199,21 @@ class ObdProvider extends ChangeNotifier {
         }
         _log('PARSED speed=$speedKph');
         break;
+      case '015E':
+        final fuelLph = _decodeFuelRateLph(numeric, bytes, dataStart);
+        if (fuelLph != null) {
+          fuelRateMlPerSecDirect = (fuelLph * 1000) / 3600;
+          _log('PARSED fuelRate=$fuelRateMlPerSecDirect mL/s');
+        }
+        break;
+      case '0104':
+        if (numeric != null) {
+          engineLoadPercent = numeric;
+        } else if (bytes.length > dataStart) {
+          engineLoadPercent = (bytes[dataStart] * 100) / 255;
+        }
+        _log('PARSED load=$engineLoadPercent');
+        break;
       case '010F':
         double? celsius;
         if (numeric != null) {
@@ -193,6 +228,7 @@ class ObdProvider extends ChangeNotifier {
         break;
     }
     notifyListeners();
+    onFrame?.call();
   }
 
   void _handleRawPayload(String payload) {
@@ -229,6 +265,19 @@ class ObdProvider extends ChangeNotifier {
           if (bytes.length >= 3) {
             speedKph = bytes[2].toDouble();
             _log('RAW speed=$speedKph');
+          }
+          break;
+        case 0x04:
+          if (bytes.length >= 3) {
+            engineLoadPercent = (bytes[2] * 100) / 255;
+            _log('RAW load=$engineLoadPercent');
+          }
+          break;
+        case 0x5E:
+          if (bytes.length >= 4) {
+            final lph = ((bytes[2] * 256) + bytes[3]) / 20;
+            fuelRateMlPerSecDirect = (lph * 1000) / 3600;
+            _log('RAW fuelRate=$fuelRateMlPerSecDirect mL/s');
           }
           break;
         case 0x0F:
@@ -286,11 +335,17 @@ class ObdProvider extends ChangeNotifier {
       case '2200101':
         mafGramsPerSec = numeric;
         break;
+      case '0104':
+        engineLoadPercent = numeric;
+        break;
       case '0144':
         equivRatio = numeric;
         break;
       case '010D':
         speedKph = numeric;
+        break;
+      case '015E':
+        fuelRateMlPerSecDirect = (numeric * 1000) / 3600;
         break;
       case '010F':
         iatKelvin = numeric + 273.15;
@@ -331,7 +386,24 @@ class ObdProvider extends ChangeNotifier {
     return pid.replaceAll(RegExp(r'\s+'), '').toUpperCase();
   }
 
+  double? _decodeFuelRateLph(double? numeric, List<int> bytes, int dataStart) {
+    if (numeric != null) return numeric;
+    if (bytes.length >= dataStart + 2) {
+      final a = bytes[dataStart];
+      final b = bytes[dataStart + 1];
+      return ((a * 256) + b) / 20;
+    }
+    return null;
+  }
+
   void _log(String message) {
+    // Throttle logging to avoid UI jank at high sample rates.
+    final now = DateTime.now();
+    if (_lastLogTime != null &&
+        now.difference(_lastLogTime!).inMilliseconds < 500) {
+      return;
+    }
+    _lastLogTime = now;
     final timestamp = DateTime.now().toIso8601String();
     debugPrint('[OBD_PROVIDER][$timestamp] $message');
   }

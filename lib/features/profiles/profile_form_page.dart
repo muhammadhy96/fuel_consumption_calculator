@@ -10,8 +10,6 @@ Future<void> showProfileFormSheet(BuildContext context, {CarProfile? profile}) a
   final nameController = TextEditingController(text: profile?.name ?? '');
   final displacementController =
       TextEditingController(text: profile?.engineDisplacement?.toString() ?? '');
-  final veController =
-      TextEditingController(text: (profile?.volumetricEfficiency ?? 85).toString());
   final notesController = TextEditingController(text: profile?.notes ?? '');
   final fuelTypes = ['Petrol', 'Diesel'];
   String fuelType = profile?.fuelType ?? fuelTypes.first;
@@ -63,14 +61,6 @@ Future<void> showProfileFormSheet(BuildContext context, {CarProfile? profile}) a
               ),
               const SizedBox(height: 12),
               TextFormField(
-                controller: veController,
-                decoration: const InputDecoration(
-                  labelText: 'Volumetric efficiency (%)',
-                ),
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
                 controller: notesController,
                 decoration: const InputDecoration(labelText: 'Notes'),
                 maxLines: 2,
@@ -91,7 +81,6 @@ Future<void> showProfileFormSheet(BuildContext context, {CarProfile? profile}) a
                         if (!formKey.currentState!.validate()) return;
                         final displacement =
                             double.tryParse(displacementController.text);
-                        final ve = double.tryParse(veController.text) ?? 85;
                         final notes = notesController.text.trim().isEmpty
                             ? null
                             : notesController.text.trim();
@@ -100,7 +89,6 @@ Future<void> showProfileFormSheet(BuildContext context, {CarProfile? profile}) a
                             name: nameController.text.trim(),
                             fuelType: fuelType,
                             engineDisplacement: displacement,
-                            volumetricEfficiency: ve,
                             notes: notes,
                           ));
                         } else {
@@ -108,7 +96,6 @@ Future<void> showProfileFormSheet(BuildContext context, {CarProfile? profile}) a
                             name: nameController.text.trim(),
                             fuelType: fuelType,
                             engineDisplacement: displacement,
-                            volumetricEfficiency: ve,
                             notes: notes,
                           ));
                         }

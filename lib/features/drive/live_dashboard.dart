@@ -52,18 +52,18 @@ class LiveDashboard extends StatelessWidget {
                 const SizedBox(height: 12),
                 Text('Elapsed: ${formatDuration(trip.elapsedSeconds)}'),
                 const SizedBox(height: 8),
-                Text(
-                  obd.lastUpdate != null
-                      ? 'Last update: ${formatTimestamp(obd.lastUpdate!)}'
-                      : 'No data yet from OBD',
-                ),
-                if (obd.lastRawMessage != null) ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    'Last frame: ${obd.lastRawMessage}',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
+                // Text(
+                //   obd.lastUpdate != null
+                //       ? 'Last update: ${formatTimestamp(obd.lastUpdate!)}'
+                //       : 'No data yet from OBD',
+                // ),
+                // if (obd.lastRawMessage != null) ...[
+                //   const SizedBox(height: 4),
+                //   Text(
+                //     'Last frame: ${obd.lastRawMessage}',
+                //     style: Theme.of(context).textTheme.bodySmall,
+                //   ),
+                // ],
               ],
             ),
           ),
@@ -74,6 +74,14 @@ class LiveDashboard extends StatelessWidget {
           value: '${fuelFlow.toStringAsFixed(2)} mL/s',
           highlight: true,
         ),
+        if (obd.fuelRateMlPerSecDirect != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              'Using direct PID 015E',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
         const SizedBox(height: 12),
         Wrap(
           spacing: 8,

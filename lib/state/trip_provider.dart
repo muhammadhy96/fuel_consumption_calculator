@@ -83,15 +83,14 @@ class TripProvider extends ChangeNotifier {
 
     final profileId = _activeProfile!.id;
     final endTime = DateTime.now();
-    final duration = _elapsedSeconds;
-    final totalFuel =
-        _samples.fold<double>(0.0, (sum, sample) => sum + sample.fuelMlPerSec);
+    final duration =
+        _samples.isNotEmpty ? _samples.last.timeSeconds.round() : _elapsedSeconds;
+    final totalFuel = _integrateFuelMl();
     final double avgFuel =
-        _samples.isEmpty ? 0.0 : totalFuel / _samples.length;
+        duration > 0 ? totalFuel / duration : 0.0;
     final distanceKm = _calculateDistanceKm();
-    final avgConsumption = distanceKm > 0
-        ? (totalFuel / 1000) / distanceKm * 100
-        : 0.0;
+    final avgConsumption =
+        distanceKm > 0 ? (totalFuel / 1000) / distanceKm * 100 : 0.0;
 
     final csvPath = await _fileService.saveTripSamples(profileId, List.of(_samples));
 
@@ -135,16 +134,32 @@ class TripProvider extends ChangeNotifier {
   }
 
   double _calculateDistanceKm() {
-    if (_samples.isEmpty) return 0;
+    if (_samples.length < 2) return 0;
     double distance = 0;
-    double previousTime = _samples.first.timeSeconds - 1;
-    for (final sample in _samples) {
-      final dt = sample.timeSeconds - previousTime;
+    for (var i = 1; i < _samples.length; i++) {
+      final prev = _samples[i - 1];
+      final curr = _samples[i];
+      final dt = curr.timeSeconds - prev.timeSeconds;
       if (dt > 0) {
-        distance += (sample.speedKph * dt) / 3600;
+        final avgSpeed = (prev.speedKph + curr.speedKph) / 2;
+        distance += (avgSpeed * dt) / 3600;
       }
-      previousTime = sample.timeSeconds;
     }
     return distance;
+  }
+
+  double _integrateFuelMl() {
+    if (_samples.length < 2) return 0;
+    double total = 0;
+    for (var i = 1; i < _samples.length; i++) {
+      final prev = _samples[i - 1];
+      final curr = _samples[i];
+      final dt = curr.timeSeconds - prev.timeSeconds;
+      if (dt > 0) {
+        final avgRate = (prev.fuelMlPerSec + curr.fuelMlPerSec) / 2;
+        total += avgRate * dt;
+      }
+    }
+    return total;
   }
 }

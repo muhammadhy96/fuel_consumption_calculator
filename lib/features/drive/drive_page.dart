@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
@@ -24,14 +22,20 @@ class DrivePage extends StatefulWidget {
 }
 
 class _DrivePageState extends State<DrivePage> {
-  Timer? _sampleTimer;
+  final Stopwatch _sampleStopwatch = Stopwatch();
+  static const int _uiUpdateIntervalMs = 100;
+  static const int _chartUpdateIntervalMs = 500;
   double _fuelFlow = 0;
   double _timeSeconds = 0;
   List<FlSpot> _chartPoints = [];
+  int _lastChartUpdateMs = 0;
+  int _lastUiUpdateMs = 0;
+  CarProfile? _activeProfile;
 
   @override
   void dispose() {
-    _sampleTimer?.cancel();
+    _sampleStopwatch.stop();
+    context.read<ObdProvider>().onFrame = null;
     context.read<ObdProvider>().stopLive();
     super.dispose();
   }
@@ -118,27 +122,35 @@ class _DrivePageState extends State<DrivePage> {
     }
     await obd.startLive();
     context.read<TripProvider>().startTrip(profile);
+    _activeProfile = profile;
 
     setState(() {
       _chartPoints = [];
       _fuelFlow = 0;
       _timeSeconds = 0;
     });
+    _sampleStopwatch
+      ..reset()
+      ..start();
+    obd.onFrame = _onObdFrame;
+  }
 
-    _sampleTimer?.cancel();
-    _sampleTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      _collectSample(profile);
-    });
+  void _onObdFrame() {
+    final profile = _activeProfile;
+    if (profile == null) return;
+    _collectSample(profile);
   }
 
   void _collectSample(CarProfile profile) {
     final obd = context.read<ObdProvider>();
     final trip = context.read<TripProvider>();
+    const double defaultVePercent = 85;
+    final vePercent = obd.engineLoadPercent ?? defaultVePercent;
     final fuel = obd.calculateFuelFlow(
-      volumetricEfficiency: profile.volumetricEfficiency,
+      volumetricEfficiency: vePercent,
       engineDisplacementLiters: profile.engineDisplacement ?? 2.0,
     );
-    _timeSeconds += 1;
+    _timeSeconds = _sampleStopwatch.elapsedMilliseconds / 1000.0;
     final sample = TripSample(
       timeSeconds: _timeSeconds,
       rpm: obd.rpm,
@@ -146,22 +158,39 @@ class _DrivePageState extends State<DrivePage> {
       speedKph: obd.speedKph,
       iatKelvin: obd.iatKelvin,
       fuelMlPerSec: fuel,
+      engineLoadPercent: obd.engineLoadPercent ?? 0,
+      mafGramsPerSec: obd.mafGramsPerSec,
+      equivRatio: obd.equivRatio,
     );
     trip.addSample(sample);
+    final nowMs = _sampleStopwatch.elapsedMilliseconds;
+    final shouldUpdateChart = nowMs - _lastChartUpdateMs >= _chartUpdateIntervalMs;
+    final shouldUpdateUi = nowMs - _lastUiUpdateMs >= _uiUpdateIntervalMs;
+    if (!shouldUpdateChart && !shouldUpdateUi) return;
+
     setState(() {
-      _fuelFlow = fuel;
-      _chartPoints.add(FlSpot(_timeSeconds, fuel));
-      if (_chartPoints.length > 600) _chartPoints.removeAt(0);
+      if (shouldUpdateUi) {
+        _fuelFlow = fuel;
+        _lastUiUpdateMs = nowMs;
+      }
+      if (shouldUpdateChart) {
+        _chartPoints.add(FlSpot(_timeSeconds, fuel));
+        if (_chartPoints.length > 1500) _chartPoints.removeAt(0);
+        _lastChartUpdateMs = nowMs;
+      }
     });
   }
 
   Future<void> _stopTrip() async {
-    _sampleTimer?.cancel();
+    _sampleStopwatch.stop();
+    final obd = context.read<ObdProvider>();
+    obd.onFrame = null;
+    await obd.stopLive();
     final profile = context.read<ProfileProvider>().selectedProfile;
     final tripProvider = context.read<TripProvider>();
     final samplesSnapshot = List<TripSample>.from(tripProvider.samples);
     final trip = await tripProvider.stopTrip();
-    context.read<ObdProvider>().stopLive();
+    _activeProfile = null;
     if (!mounted || profile == null || trip == null) return;
 
     Navigator.of(context).push(
@@ -281,6 +310,8 @@ class _DrivePageState extends State<DrivePage> {
       minX: viewStart,
       maxX: adjustedEnd,
       minY: 0,
+      clipData: const FlClipData.all(),
+      borderData: FlBorderData(show: true),
       lineBarsData: [
         LineChartBarData(
           spots: points,
@@ -306,7 +337,7 @@ class _DrivePageState extends State<DrivePage> {
         leftTitles: AxisTitles(
           axisNameWidget: const Padding(
             padding: EdgeInsets.only(right: 4),
-            child: Text('mL/s'),
+            child: Text('Fuel rate (mL/s)'),
           ),
           sideTitles: SideTitles(
             showTitles: true,
