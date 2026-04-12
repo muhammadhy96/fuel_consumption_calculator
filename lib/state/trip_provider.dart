@@ -40,7 +40,7 @@ class TripProvider extends ChangeNotifier {
   Future<void> loadTrips() async {
     final stored = await _storage.loadTrips();
     _tripsByProfile
-      ..clear();
+      .clear();
     final allTrips = <Trip>[];
     for (final trip in stored) {
       final list = _tripsByProfile.putIfAbsent(trip.profileId, () => []);
@@ -86,13 +86,17 @@ class TripProvider extends ChangeNotifier {
     final duration =
         _samples.isNotEmpty ? _samples.last.timeSeconds.round() : _elapsedSeconds;
     final totalFuel = _integrateFuelMl();
-    final double avgFuel =
-        duration > 0 ? totalFuel / duration : 0.0;
+    final avgFuel = duration > 0 ? totalFuel / duration : 0.0;
     final distanceKm = _calculateDistanceKm();
     final avgConsumption =
         distanceKm > 0 ? (totalFuel / 1000) / distanceKm * 100 : 0.0;
 
-    final csvPath = await _fileService.saveTripSamples(profileId, List.of(_samples));
+    String? csvPath;
+    try {
+      csvPath = await _fileService.saveTripSamples(profileId, List.of(_samples));
+    } catch (err) {
+      debugPrint('Failed to save trip samples: $err');
+    }
 
     final trip = Trip(
       id: 'trip-${DateTime.now().millisecondsSinceEpoch}',
@@ -110,7 +114,11 @@ class TripProvider extends ChangeNotifier {
     final list = _tripsByProfile.putIfAbsent(profileId, () => []);
     list.insert(0, trip);
     _lastTrip = trip;
-    await _storage.saveTrip(trip);
+    try {
+      await _storage.saveTrip(trip);
+    } catch (err) {
+      debugPrint('Failed to persist trip metadata: $err');
+    }
 
     _activeProfile = null;
     _elapsedSeconds = 0;
@@ -131,6 +139,13 @@ class TripProvider extends ChangeNotifier {
 
   Future<List<TripSample>> loadSamples(String path) {
     return _fileService.loadTripSamples(path);
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _timer = null;
+    super.dispose();
   }
 
   double _calculateDistanceKm() {

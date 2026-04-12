@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../features/drive/drive_page.dart';
 import '../features/profiles/profiles_page.dart';
+import '../features/shell/app_shell.dart';
 import '../features/trips/trip_details_page.dart';
 import '../features/trips/trips_page.dart';
 
@@ -21,13 +22,33 @@ class AppRoutes {
       case trips:
         return MaterialPageRoute(builder: (_) => const TripsPage());
       case tripDetails:
-        final args = settings.arguments as TripDetailsArguments;
+        final args = settings.arguments;
+        if (args is! TripDetailsArguments) {
+          return _errorRoute('Missing or invalid trip details arguments.');
+        }
         return MaterialPageRoute(
           builder: (_) => TripDetailsPage(arguments: args),
         );
       case home:
       default:
-        return MaterialPageRoute(builder: (_) => const DrivePage());
+        return MaterialPageRoute(builder: (_) => const AppShell());
     }
+  }
+
+  static Route<dynamic> _errorRoute(String message) {
+    return MaterialPageRoute(
+      builder: (_) => Scaffold(
+        appBar: AppBar(title: const Text('Navigation Error')),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Text(
+              message,
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }

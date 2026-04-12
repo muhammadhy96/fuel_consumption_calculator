@@ -24,9 +24,14 @@ class FileService {
       return downloads;
     }
 
-    final selectedPath = await FilePicker.platform.getDirectoryPath(
-      dialogTitle: 'Select folder to save trip exports',
-    );
+    String? selectedPath;
+    try {
+      selectedPath = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: 'Select folder to save trip exports',
+      );
+    } catch (_) {
+      selectedPath = null;
+    }
     if (selectedPath != null) {
       _cachedDirectory = Directory(selectedPath);
       return _cachedDirectory!;
@@ -67,8 +72,26 @@ class FileService {
   Future<List<TripSample>> loadTripSamples(String path) async {
     final file = File(path);
     if (!await file.exists()) return [];
-    final content = await file.readAsString();
-    final rows = const CsvToListConverter().convert(content);
-    return rows.skip(1).map(TripSample.fromCsvRow).toList();
+
+    try {
+      final content = await file.readAsString();
+      final rows = const CsvToListConverter().convert(content);
+      if (rows.length <= 1) return [];
+
+      final samples = <TripSample>[];
+      for (final row in rows.skip(1)) {
+        if (row.length < 5) {
+          continue;
+        }
+        try {
+          samples.add(TripSample.fromCsvRow(List<dynamic>.from(row)));
+        } catch (_) {
+          // Skip malformed sample rows to keep the trip readable.
+        }
+      }
+      return samples;
+    } catch (_) {
+      return [];
+    }
   }
 }

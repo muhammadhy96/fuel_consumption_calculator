@@ -1,13 +1,25 @@
-import 'dart:convert';
+import 'dart:async';
+import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 
+import '../core/constants/obd_pids.dart';
 import '../core/services/obd_service.dart';
+import '../core/utils/pid_support.dart';
 
+/// Holds live telemetry decoded from the ELM327 and exposes it to the UI.
+///
+/// Parses responses from bulk multi-PID commands shaped like
+/// `41 0C AA BB 0D XX 0B YY 10 ZZ ZZ 04 WW 0F VV`, i.e. one mode byte followed
+/// by repeated `PID + N data bytes` groups. This single-pass parser replaces
+/// the legacy per-PID switch-case and decouples parsing from the command
+/// that was sent — so if the ECU echoes PIDs out of order, we still decode.
 class ObdProvider extends ChangeNotifier {
-  ObdProvider(this._obdService);
+  ObdProvider(this._obdService) {
+    _obdService.onDisconnected = _handleServiceDisconnected;
+  }
 
   final ObdService _obdService;
 
@@ -16,31 +28,60 @@ class ObdProvider extends ChangeNotifier {
   bool _live = false;
   VoidCallback? onFrame;
 
+  // Live telemetry fields. Kept public for simple widget access.
   double rpm = 0;
   double mapKpa = 0;
   double speedKph = 0;
   double mafGramsPerSec = 0;
   double equivRatio = 1.0;
   double iatKelvin = 0;
+  double coolantKelvin = 0;
+  double throttlePercent = 0;
+  double batteryVolts = 0;
   double? engineLoadPercent;
+  double? fuelTankPercent;
   double? fuelRateMlPerSecDirect;
+  double? baroKpa;
   String? lastRawMessage;
   DateTime? lastUpdate;
   DateTime? _lastLogTime;
+  final Set<String> _cyclePidsSeen = <String>{};
+  bool _disposed = false;
+  bool _fuelRateProbed = false;
+  int _framesDecoded = 0;
+  final PidSupport _pidSupport = PidSupport();
+
+  // Short rolling window of fuel-flow samples to smooth the UI readout.
+  static const int _smoothingWindowSize = 8;
+  final Queue<double> _smoothFuelWindow = Queue<double>();
+  double _smoothFuelSum = 0;
+
+  static const Set<String> _cycleCandidatePids = {
+    '010C', '010D', '010B', '0110', '0104', '010F',
+  };
 
   BluetoothDevice? get device => _connectedDevice;
   bool get connected => _connected;
   bool get live => _live;
+  int get framesDecoded => _framesDecoded;
+  Set<String> get supportedPids => _pidSupport.supportedPids;
 
-  Future<List<BluetoothDevice>> getPairedDevices() async {
-    return _obdService.getPairedDevices();
+  double get smoothedFuelMlPerSec {
+    if (_smoothFuelWindow.isEmpty) return 0;
+    return _smoothFuelSum / _smoothFuelWindow.length;
   }
+
+  Future<List<BluetoothDevice>> getPairedDevices() =>
+      _obdService.getPairedDevices();
 
   Future<void> connect(BluetoothDevice device) async {
     await _obdService.connect(device);
     _connectedDevice = device;
     _connected = true;
-    notifyListeners();
+    _live = false;
+    _cyclePidsSeen.clear();
+    _fuelRateProbed = false;
+    _notifyIfActive();
   }
 
   Future<String?> verifyConnection() async {
@@ -49,7 +90,7 @@ class ObdProvider extends ChangeNotifier {
     if (sample != null && !sample.toUpperCase().contains('STOPPED')) {
       lastRawMessage = sample;
       lastUpdate = DateTime.now();
-      notifyListeners();
+      _notifyIfActive();
       return sample;
     }
     return null;
@@ -57,35 +98,35 @@ class ObdProvider extends ChangeNotifier {
 
   Future<void> startLive() async {
     if (!_connected || _live) return;
-    await _obdService.startListening(_handleObdData);
+    final started = await _obdService.startListening(_handleObdData);
+    if (!started) {
+      _handleServiceDisconnected();
+      return;
+    }
     _live = true;
-    notifyListeners();
+    _notifyIfActive();
   }
 
   Future<void> stopLive() async {
-    if (_connectedDevice != null) {
-      await _obdService.stopListening(_connectedDevice!);
-    }
+    await _obdService.stopListening();
     _live = false;
-    rpm = 0;
-    mapKpa = 0;
-    speedKph = 0;
-    mafGramsPerSec = 0;
-    equivRatio = 1.0;
-    iatKelvin = 0;
-    engineLoadPercent = null;
-    fuelRateMlPerSecDirect = null;
+    _cyclePidsSeen.clear();
+    _resetTelemetry();
     onFrame = null;
-    notifyListeners();
+    _notifyIfActive();
   }
 
   Future<void> disconnect() async {
-    await stopLive();
-    _connectedDevice = null;
+    await _obdService.disconnect();
+    _live = false;
     _connected = false;
+    _connectedDevice = null;
+    _cyclePidsSeen.clear();
+    _resetTelemetry();
+    onFrame = null;
     lastRawMessage = null;
     lastUpdate = null;
-    notifyListeners();
+    _notifyIfActive();
   }
 
   double calculateFuelFlow({
@@ -111,300 +152,291 @@ class ObdProvider extends ChangeNotifier {
     );
   }
 
+  /// Pushes a smoothed fuel sample into the rolling window and returns the
+  /// smoothed value. The caller drives this from trip sampling.
+  double pushFuelSample(double sample) {
+    if (_smoothFuelWindow.length >= _smoothingWindowSize) {
+      _smoothFuelSum -= _smoothFuelWindow.removeFirst();
+    }
+    _smoothFuelWindow.add(sample);
+    _smoothFuelSum += sample;
+    return smoothedFuelMlPerSec;
+  }
+
   void _handleObdData(String data) {
+    if (_disposed) return;
     final trimmed = data.trim();
-    if (trimmed.toUpperCase() == 'STOPPED') {
-      _log('IGNORED STOPPED frame');
-      return;
-    }
     if (trimmed.isEmpty) return;
-    _log('RAW $data');
-    final splitIndex = data.indexOf(':');
-    if (splitIndex == -1) {
-      _handleRawPayload(data.trim());
-      notifyListeners();
+    final upper = trimmed.toUpperCase();
+    if (upper.contains('STOPPED') ||
+        upper.contains('NO DATA') ||
+        upper.contains('SEARCHING')) {
       return;
     }
-    final pid = data.substring(0, splitIndex).trim();
-    final payload = data.substring(splitIndex + 1).trim();
-    final normalizedPid = _normalizePid(pid);
 
     lastRawMessage = data;
     lastUpdate = DateTime.now();
+    _framesDecoded += 1;
 
-    if (normalizedPid.isEmpty || pid.toUpperCase() == 'RAW') {
-      _handleRawPayload(payload);
-      notifyListeners();
-      onFrame?.call();
-      return;
-    }
-
-    if (normalizedPid == 'PARAMETER') {
-      _handleBatchPayload(payload);
-      _log('PARSED batch rpm=$rpm map=$mapKpa iatK=$iatKelvin');
-      notifyListeners();
-      onFrame?.call();
-      return;
-    }
-
-    final numeric = _parseFirstNumber(payload);
-    final bytes = numeric == null ? _parseHexBytes(payload) : const <int>[];
-    int dataStart = 0;
-    if (bytes.length >= 3 && bytes[0] == 0x62) {
-      dataStart = 3;
-    } else if (bytes.length >= 2 && bytes[0] == 0x41) {
-      dataStart = 2;
-    }
-
-    switch (normalizedPid) {
-      case '010C':
-        if (numeric != null) {
-          rpm = numeric;
-        } else if (bytes.length >= dataStart + 2) {
-          rpm = ((bytes[dataStart] * 256) + bytes[dataStart + 1]) / 4;
-        }
-        _log('PARSED rpm=$rpm');
-        break;
-      case '010B':
-        if (numeric != null) {
-          mapKpa = numeric;
-        } else if (bytes.length > dataStart) {
-          mapKpa = bytes[dataStart].toDouble();
-        }
-        _log('PARSED map=$mapKpa');
-        break;
-      case '0110':
-      case '220101':
-      case '2200101':
-        if (numeric != null) {
-          mafGramsPerSec = numeric;
-        } else if (bytes.length >= dataStart + 2) {
-          mafGramsPerSec = ((bytes[dataStart] * 256) + bytes[dataStart + 1]) / 100;
-        }
-        _log('PARSED maf=$mafGramsPerSec');
-        break;
-      case '0144':
-        if (numeric != null) {
-          equivRatio = numeric;
-        } else if (bytes.length >= dataStart + 2) {
-          equivRatio = ((bytes[dataStart] * 256) + bytes[dataStart + 1]) / 32768;
-        }
-        _log('PARSED equivRatio=$equivRatio');
-        break;
-      case '010D':
-        if (numeric != null) {
-          speedKph = numeric;
-        } else if (bytes.length > dataStart) {
-          speedKph = bytes[dataStart].toDouble();
-        }
-        _log('PARSED speed=$speedKph');
-        break;
-      case '015E':
-        final fuelLph = _decodeFuelRateLph(numeric, bytes, dataStart);
-        if (fuelLph != null) {
-          fuelRateMlPerSecDirect = (fuelLph * 1000) / 3600;
-          _log('PARSED fuelRate=$fuelRateMlPerSecDirect mL/s');
-        }
-        break;
-      case '0104':
-        if (numeric != null) {
-          engineLoadPercent = numeric;
-        } else if (bytes.length > dataStart) {
-          engineLoadPercent = (bytes[dataStart] * 100) / 255;
-        }
-        _log('PARSED load=$engineLoadPercent');
-        break;
-      case '010F':
-        double? celsius;
-        if (numeric != null) {
-          celsius = numeric;
-        } else if (bytes.length > dataStart) {
-          celsius = bytes[dataStart] - 40;
-        }
-        if (celsius != null) {
-          iatKelvin = celsius + 273.15;
-        }
-        _log('PARSED iatK=$iatKelvin');
-        break;
-    }
-    notifyListeners();
-    onFrame?.call();
-  }
-
-  void _handleRawPayload(String payload) {
-    if (payload.isEmpty) return;
+    final colonIndex = data.indexOf(':');
+    final payload = colonIndex >= 0 ? data.substring(colonIndex + 1) : data;
     final bytes = _parseHexBytes(payload);
-    if (bytes.length >= 2 && bytes[0] == 0x41) {
-      final pidByte = bytes[1];
-      switch (pidByte) {
-        case 0x0C:
-          if (bytes.length >= 4) {
-            rpm = ((bytes[2] * 256) + bytes[3]) / 4;
-            _log('RAW rpm=$rpm');
+    if (bytes.isEmpty) {
+      _log('RAW no bytes in $data');
+      return;
+    }
+
+    final seen = <String>{};
+    _decodeMultiPidFrame(bytes, seen);
+    for (final pid in seen) {
+      _markPidForCycle(pid);
+    }
+    _notifyIfActive();
+  }
+
+  /// Decodes one or more `PID + dataBytes` groups packed in a single response.
+  ///
+  /// Mode 01 responses begin with 0x41. There can be multiple 0x41 blocks in
+  /// a multi-frame reply; each block is followed by repeating `pid + N` groups
+  /// until the next 0x41 or the end of the payload.
+  void _decodeMultiPidFrame(List<int> bytes, Set<String> seen) {
+    var i = 0;
+    while (i < bytes.length) {
+      final modeByte = bytes[i];
+
+      if (modeByte == 0x41) {
+        i += 1;
+        // Supported-PID bitmask responses (01 00, 01 20, 01 40) carry
+        // exactly 4 data bytes and we should not try to decode them as
+        // telemetry PIDs.
+        if (i < bytes.length &&
+            (bytes[i] == 0x00 || bytes[i] == 0x20 || bytes[i] == 0x40) &&
+            i + 5 <= bytes.length) {
+          _pidSupport.parseRange(bytes[i], bytes.sublist(i + 1, i + 5));
+          _log('PID support bitmask parsed for range 0x${bytes[i].toRadixString(16)}');
+          i += 5;
+          continue;
+        }
+        // Walk the inner run until we either exhaust the stream or bump into
+        // another 0x41 header which marks the next frame.
+        while (i < bytes.length && bytes[i] != 0x41) {
+          final pidByte = bytes[i];
+          final pidKey = '01${pidByte.toRadixString(16).padLeft(2, '0')}'
+              .toUpperCase();
+          final length = pidByteLength[pidKey];
+          if (length == null || i + 1 + length > bytes.length) {
+            i = bytes.length;
+            break;
           }
-          break;
-        case 0x0B:
-          if (bytes.length >= 3) {
-            mapKpa = bytes[2].toDouble();
-            _log('RAW map=$mapKpa');
-          }
-          break;
-        case 0x10:
-          if (bytes.length >= 4) {
-            mafGramsPerSec = ((bytes[2] * 256) + bytes[3]) / 100;
-            _log('RAW maf=$mafGramsPerSec');
-          }
-          break;
-        case 0x44:
-          if (bytes.length >= 4) {
-            equivRatio = ((bytes[2] * 256) + bytes[3]) / 32768;
-            _log('RAW equivRatio=$equivRatio');
-          }
-          break;
-        case 0x0D:
-          if (bytes.length >= 3) {
-            speedKph = bytes[2].toDouble();
-            _log('RAW speed=$speedKph');
-          }
-          break;
-        case 0x04:
-          if (bytes.length >= 3) {
-            engineLoadPercent = (bytes[2] * 100) / 255;
-            _log('RAW load=$engineLoadPercent');
-          }
-          break;
-        case 0x5E:
-          if (bytes.length >= 4) {
-            final lph = ((bytes[2] * 256) + bytes[3]) / 20;
-            fuelRateMlPerSecDirect = (lph * 1000) / 3600;
-            _log('RAW fuelRate=$fuelRateMlPerSecDirect mL/s');
-          }
-          break;
-        case 0x0F:
-          if (bytes.length >= 3) {
-            iatKelvin = (bytes[2] - 40) + 273.15;
-            _log('RAW iatK=$iatKelvin');
-          }
-          break;
+          final payload = bytes.sublist(i + 1, i + 1 + length);
+          _updatePid(pidKey, payload);
+          seen.add(pidKey);
+          i += 1 + length;
+        }
+        continue;
       }
-    } else if (bytes.length >= 5 && bytes[0] == 0x62) {
-      final pidNormalized = '22${bytes[1].toRadixString(16).padLeft(2, '0')}'
-              '${bytes[2].toRadixString(16).padLeft(2, '0')}'
-          .toUpperCase();
-      if (pidNormalized == '220101' || pidNormalized == '2200101') {
-        mafGramsPerSec = ((bytes[3] * 256) + bytes[4]) / 100;
-        _log('RAW maf(ext)=$mafGramsPerSec');
+
+      if (modeByte == 0x62 && i + 2 < bytes.length) {
+        // Mode 22 response: 62 PIDHI PIDLO DATA...
+        final pidKey = '22'
+            '${bytes[i + 1].toRadixString(16).padLeft(2, '0')}'
+            '${bytes[i + 2].toRadixString(16).padLeft(2, '0')}'.toUpperCase();
+        // Only MAF extended is handled today.
+        if ((pidKey == '220101' || pidKey == '2200101') &&
+            i + 4 < bytes.length) {
+          mafGramsPerSec = ((bytes[i + 3] * 256) + bytes[i + 4]) / 100;
+          seen.add('0110');
+          _log('EXT MAF=$mafGramsPerSec');
+          i += 5;
+          continue;
+        }
+        i += 3;
+        continue;
       }
-    } else {
-      final numeric = _parseFirstNumber(payload);
-      if (numeric != null) {
-        _log('RAW numeric=$numeric');
-      }
+
+      // Unknown byte — advance and keep scanning. This keeps us robust
+      // against CAN header garbage or stray bytes the plugin may leave in.
+      i += 1;
     }
   }
 
-  void _handleBatchPayload(String payload) {
-    try {
-      final decoded = jsonDecode(payload);
-      if (decoded is! List) return;
-      for (final item in decoded) {
-        if (item is! Map) continue;
-        final pid = (item['PID'] as String?)?.trim();
-        final normalizedPid = _normalizePid(pid ?? '');
-        final response = (item['response'] as String?)?.trim();
-        if (normalizedPid.isEmpty || response == null || response.isEmpty) continue;
-        _updatePidValue(normalizedPid, response);
-      }
-    } catch (_) {
-      // Ignore malformed payloads.
-    }
-  }
-
-  void _updatePidValue(String pid, String response) {
-    final numeric = _parseFirstNumber(response);
-    if (numeric == null) return;
+  void _updatePid(String pid, List<int> data) {
     switch (pid) {
       case '010C':
-        rpm = numeric;
-        break;
-      case '010B':
-        mapKpa = numeric;
-        break;
-      case '0110':
-      case '220101':
-      case '2200101':
-        mafGramsPerSec = numeric;
-        break;
-      case '0104':
-        engineLoadPercent = numeric;
-        break;
-      case '0144':
-        equivRatio = numeric;
+        if (data.length >= 2) rpm = ((data[0] * 256) + data[1]) / 4;
         break;
       case '010D':
-        speedKph = numeric;
+        speedKph = data[0].toDouble();
         break;
-      case '015E':
-        fuelRateMlPerSecDirect = (numeric * 1000) / 3600;
+      case '010B':
+        mapKpa = data[0].toDouble();
+        break;
+      case '0110':
+        if (data.length >= 2) {
+          mafGramsPerSec = ((data[0] * 256) + data[1]) / 100;
+        }
+        break;
+      case '0104':
+        engineLoadPercent = (data[0] * 100) / 255;
         break;
       case '010F':
-        iatKelvin = numeric + 273.15;
+        iatKelvin = (data[0] - 40) + 273.15;
+        break;
+      case '0105':
+        coolantKelvin = (data[0] - 40) + 273.15;
+        break;
+      case '0111':
+        throttlePercent = (data[0] * 100) / 255;
+        break;
+      case '0142':
+        if (data.length >= 2) {
+          batteryVolts = ((data[0] * 256) + data[1]) / 1000;
+        }
+        break;
+      case '012F':
+        fuelTankPercent = (data[0] * 100) / 255;
+        break;
+      case '0133':
+        baroKpa = data[0].toDouble();
+        break;
+      case '0144':
+        if (data.length >= 2) {
+          equivRatio = ((data[0] * 256) + data[1]) / 32768;
+        }
+        break;
+      case '015E':
+        if (data.length >= 2) {
+          final lph = ((data[0] * 256) + data[1]) / 20;
+          fuelRateMlPerSecDirect = (lph * 1000) / 3600;
+          if (!_fuelRateProbed && (fuelRateMlPerSecDirect ?? 0) > 0) {
+            _fuelRateProbed = true;
+            _obdService.enableFuelRatePid();
+          }
+        }
         break;
     }
-    _log('PID $pid response=$response => rpm=$rpm map=$mapKpa iatK=$iatKelvin');
   }
 
   List<int> _parseHexBytes(String raw) {
     final cleaned = raw.replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
     final bytes = <int>[];
-    if (cleaned.length >= 2) {
-      for (var i = 0; i + 1 < cleaned.length; i += 2) {
-        final pair = cleaned.substring(i, i + 2);
-        final value = int.tryParse(pair, radix: 16);
-        if (value != null) bytes.add(value);
-      }
-      if (bytes.isNotEmpty) return bytes;
-    }
-
-    final tokens = raw.trim().split(RegExp(r'\s+'));
-    for (final token in tokens) {
-      final tokenCleaned = token.replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
-      if (tokenCleaned.isEmpty) continue;
-      final value = int.tryParse(tokenCleaned, radix: 16);
+    for (var i = 0; i + 1 < cleaned.length; i += 2) {
+      final value = int.tryParse(cleaned.substring(i, i + 2), radix: 16);
       if (value != null) bytes.add(value);
     }
     return bytes;
   }
 
-  double? _parseFirstNumber(String raw) {
-    final match = RegExp(r'-?\d+(?:\.\d+)?').firstMatch(raw);
-    if (match == null) return null;
-    return double.tryParse(match.group(0) ?? '');
-  }
-
-  String _normalizePid(String pid) {
-    return pid.replaceAll(RegExp(r'\s+'), '').toUpperCase();
-  }
-
-  double? _decodeFuelRateLph(double? numeric, List<int> bytes, int dataStart) {
-    if (numeric != null) return numeric;
-    if (bytes.length >= dataStart + 2) {
-      final a = bytes[dataStart];
-      final b = bytes[dataStart + 1];
-      return ((a * 256) + b) / 20;
-    }
-    return null;
-  }
-
   void _log(String message) {
-    // Throttle logging to avoid UI jank at high sample rates.
     final now = DateTime.now();
     if (_lastLogTime != null &&
         now.difference(_lastLogTime!).inMilliseconds < 500) {
       return;
     }
     _lastLogTime = now;
-    final timestamp = DateTime.now().toIso8601String();
-    debugPrint('[OBD_PROVIDER][$timestamp] $message');
+    if (kDebugMode) {
+      debugPrint('[OBD][${now.toIso8601String()}] $message');
+    }
+  }
+
+  void _handleServiceDisconnected() {
+    _connected = false;
+    _live = false;
+    _cyclePidsSeen.clear();
+    _resetTelemetry();
+    onFrame = null;
+    _notifyIfActive();
+  }
+
+  void _markPidForCycle(String pid) {
+    if (!_cycleCandidatePids.contains(pid)) return;
+    _cyclePidsSeen.add(pid);
+    if (_isCycleReadyForSampling()) {
+      _cyclePidsSeen.clear();
+      onFrame?.call();
+    }
+  }
+
+  bool _isCycleReadyForSampling() {
+    final hasRpm = _cyclePidsSeen.contains('010C');
+    final hasFuelSignal = _cyclePidsSeen.contains('0110') ||
+        _cyclePidsSeen.contains('010B');
+    return hasRpm && hasFuelSignal;
+  }
+
+  /// Reads stored DTCs (mode 03) and decodes them into standard OBD-II codes.
+  Future<List<String>> readDtc() async {
+    final raw = await _obdService.requestDtcRaw();
+    if (raw == null) return [];
+    return _decodeDtcResponse(raw);
+  }
+
+  Future<void> clearDtc() async {
+    await _obdService.clearDtc();
+  }
+
+  List<String> _decodeDtcResponse(String raw) {
+    final bytes = _parseHexBytes(raw);
+    // Mode 03 response: 43 followed by pairs of bytes per DTC.
+    final codes = <String>[];
+    var i = 0;
+    while (i < bytes.length) {
+      if (bytes[i] == 0x43) {
+        i += 1;
+        continue;
+      }
+      if (i + 1 >= bytes.length) break;
+      final a = bytes[i];
+      final b = bytes[i + 1];
+      if (a == 0 && b == 0) {
+        i += 2;
+        continue;
+      }
+      final category = (a >> 6) & 0x03;
+      final prefix = const ['P', 'C', 'B', 'U'][category];
+      final digit1 = (a >> 4) & 0x03;
+      final digit2 = a & 0x0F;
+      final digit3 = (b >> 4) & 0x0F;
+      final digit4 = b & 0x0F;
+      codes.add('$prefix$digit1'
+          '${digit2.toRadixString(16).toUpperCase()}'
+          '${digit3.toRadixString(16).toUpperCase()}'
+          '${digit4.toRadixString(16).toUpperCase()}');
+      i += 2;
+    }
+    return codes;
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    onFrame = null;
+    _obdService.onDisconnected = null;
+    unawaited(_obdService.disconnect(notify: false));
+    super.dispose();
+  }
+
+  void _notifyIfActive() {
+    if (_disposed) return;
+    notifyListeners();
+  }
+
+  void _resetTelemetry() {
+    rpm = 0;
+    mapKpa = 0;
+    speedKph = 0;
+    mafGramsPerSec = 0;
+    equivRatio = 1.0;
+    iatKelvin = 0;
+    coolantKelvin = 0;
+    throttlePercent = 0;
+    batteryVolts = 0;
+    engineLoadPercent = null;
+    fuelTankPercent = null;
+    fuelRateMlPerSecDirect = null;
+    baroKpa = null;
+    _smoothFuelWindow.clear();
+    _smoothFuelSum = 0;
+    _framesDecoded = 0;
   }
 }

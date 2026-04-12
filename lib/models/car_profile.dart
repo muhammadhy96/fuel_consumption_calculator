@@ -6,6 +6,7 @@ class CarProfile {
     this.engineDisplacement,
     this.notes,
     this.volumetricEfficiency = 85,
+    this.fuelPricePerLiter = 0,
     DateTime? createdAt,
   })  : id = id ?? 'profile-${DateTime.now().millisecondsSinceEpoch}',
         createdAt = createdAt ?? DateTime.now();
@@ -15,6 +16,7 @@ class CarProfile {
   final String fuelType;
   final double? engineDisplacement;
   final double volumetricEfficiency;
+  final double fuelPricePerLiter;
   final String? notes;
   final DateTime createdAt;
 
@@ -23,6 +25,7 @@ class CarProfile {
     String? fuelType,
     double? engineDisplacement,
     double? volumetricEfficiency,
+    double? fuelPricePerLiter,
     String? notes,
   }) {
     return CarProfile(
@@ -31,6 +34,7 @@ class CarProfile {
       fuelType: fuelType ?? this.fuelType,
       engineDisplacement: engineDisplacement ?? this.engineDisplacement,
       volumetricEfficiency: volumetricEfficiency ?? this.volumetricEfficiency,
+      fuelPricePerLiter: fuelPricePerLiter ?? this.fuelPricePerLiter,
       notes: notes ?? this.notes,
       createdAt: createdAt,
     );
@@ -43,6 +47,7 @@ class CarProfile {
       'fuelType': fuelType,
       'engineDisplacement': engineDisplacement,
       'volumetricEfficiency': volumetricEfficiency,
+      'fuelPricePerLiter': fuelPricePerLiter,
       'notes': notes,
       'createdAt': createdAt.toIso8601String(),
     };
@@ -56,6 +61,8 @@ class CarProfile {
       engineDisplacement: (map['engineDisplacement'] as num?)?.toDouble(),
       volumetricEfficiency:
           (map['volumetricEfficiency'] as num?)?.toDouble() ?? 85,
+      fuelPricePerLiter:
+          (map['fuelPricePerLiter'] as num?)?.toDouble() ?? 0,
       notes: map['notes'] as String?,
       createdAt: map['createdAt'] != null
           ? DateTime.tryParse(map['createdAt'] as String) ?? DateTime.now()

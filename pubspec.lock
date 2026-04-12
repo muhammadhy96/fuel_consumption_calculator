@@ -119,7 +119,7 @@ packages:
     source: sdk
     version: "0.0.0"
   flutter_bluetooth_serial:
-    dependency: transitive
+    dependency: "direct main"
     description:
       path: "."
       ref: master

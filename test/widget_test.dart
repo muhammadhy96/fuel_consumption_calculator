@@ -1,30 +1,18 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:fuel_consumption_calculator/main.dart';
+import 'package:fuel_consumption_calculator/core/utils/formatters.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const FuelTripApp());
+  test('formatDuration renders hours and minutes when above one hour', () {
+    expect(formatDuration(3665), '1h 1m');
+  });
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+  test('formatFuel converts milliliters to liters', () {
+    expect(formatFuel(1250), '1.25 L');
+  });
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
-
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+  test('formatConsumption hides non-positive values', () {
+    expect(formatConsumption(0), '--');
+    expect(formatConsumption(6.789), '6.79 L/100km');
   });
 }
