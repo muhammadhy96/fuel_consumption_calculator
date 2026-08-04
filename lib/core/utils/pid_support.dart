@@ -1,3 +1,5 @@
+import '../constants/obd_pids.dart';
+
 /// Decodes the response from OBD supported-PIDs queries (01 00, 01 20, 01 40)
 /// into a set of canonical PID keys (e.g. '010C', '010D').
 ///
@@ -6,6 +8,8 @@
 /// PID 0x01, bit 7 of the last byte is PID 0x20.
 class PidSupport {
   PidSupport();
+
+  static final RegExp _nonHex = RegExp(r'[^0-9a-fA-F]');
 
   final Set<String> _supported = {};
   bool _parsed = false;
@@ -40,7 +44,7 @@ class PidSupport {
   /// first two bytes are the mode echo (41) and the PID echo (00/20/40); the
   /// remaining 4 bytes are the bitmask.
   void parseRawResponse(String raw) {
-    final cleaned = raw.replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
+    final cleaned = raw.replaceAll(_nonHex, '');
     final bytes = <int>[];
     for (var i = 0; i + 1 < cleaned.length; i += 2) {
       final v = int.tryParse(cleaned.substring(i, i + 2), radix: 16);
@@ -61,15 +65,40 @@ class PidSupport {
     ];
   }
 
-  /// Builds an OBD multi-PID command string from the filtered PID list.
-  /// Strips the "01" mode prefix and space-joins bare PID bytes.
-  /// Example: ['010C', '010D', '010B'] → '01 0C 0D 0B'.
-  String buildBulkCommand(List<String> pids) {
-    if (pids.isEmpty) return '';
-    final pidBytes = [
-      for (final pid in pids)
-        pid.substring(2),
+  /// True when the bitmask says PID 0x20 (or 0x40) is supported, meaning the
+  /// next probe range is worth requesting.
+  bool hasNextRange(int rangeStart) {
+    final nextPid = rangeStart + 0x20;
+    final key = '01${nextPid.toRadixString(16).padLeft(2, '0')}'.toUpperCase();
+    return _supported.contains(key);
+  }
+
+  /// Splits [pids] into ELM327 bulk mode-01 commands of at most
+  /// [maxPidsPerBulkRequest] PIDs each.
+  /// e.g. `['010C','010D','010B']` -> `['01 0C 0D 0B']`.
+  List<String> buildBulkCommands(List<String> pids) {
+    if (pids.isEmpty) return const [];
+    final commands = <String>[];
+    for (var start = 0; start < pids.length; start += maxPidsPerBulkRequest) {
+      final rawEnd = start + maxPidsPerBulkRequest;
+      final end = rawEnd < pids.length ? rawEnd : pids.length;
+      final buffer = StringBuffer('01');
+      for (var i = start; i < end; i++) {
+        buffer
+          ..write(' ')
+          ..write(pids[i].toUpperCase().substring(2));
+      }
+      commands.add(buffer.toString());
+    }
+    return commands;
+  }
+
+  /// One command per PID, for adapters that reject multi-PID requests.
+  /// e.g. `['010C']` -> `['01 0C']`.
+  List<String> buildSingleCommands(List<String> pids) {
+    if (pids.isEmpty) return const [];
+    return [
+      for (final pid in pids) '01 ${pid.toUpperCase().substring(2)}',
     ];
-    return '01 ${pidBytes.join(' ')}';
   }
 }

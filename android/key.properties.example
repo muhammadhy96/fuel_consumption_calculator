@@ -1,0 +1,4 @@
+storeFile=C:\\path\\to\\fuel-trip-tracker.jks
+storePassword=replace-me
+keyAlias=upload
+keyPassword=replace-me

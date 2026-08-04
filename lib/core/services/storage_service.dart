@@ -7,9 +7,11 @@ import '../../models/trip.dart';
 class StorageService {
   static const String profilesBoxName = 'profiles_box';
   static const String tripsBoxName = 'trips_box';
+  static const String settingsBoxName = 'settings_box';
 
   Box<Map<dynamic, dynamic>>? _profilesBox;
   Box<Map<dynamic, dynamic>>? _tripsBox;
+  Box<String>? _settingsBox;
   Future<void>? _initFuture;
 
   Future<void> init() {
@@ -22,10 +24,13 @@ class StorageService {
     _profilesBox ??=
         await Hive.openBox<Map<dynamic, dynamic>>(profilesBoxName);
     _tripsBox ??= await Hive.openBox<Map<dynamic, dynamic>>(tripsBoxName);
+    _settingsBox ??= await Hive.openBox<String>(settingsBoxName);
   }
 
   Future<void> _ensureInitialized() async {
-    if (_profilesBox != null && _tripsBox != null) return;
+    if (_profilesBox != null && _tripsBox != null && _settingsBox != null) {
+      return;
+    }
     await init();
   }
 
@@ -77,5 +82,25 @@ class StorageService {
   Future<void> deleteTrip(String id) async {
     await _ensureInitialized();
     await _tripsBox!.delete(id);
+  }
+
+  /// Reads a small free-form setting (e.g. the ELM327 protocol cached per
+  /// device address). Returns null when the key was never written.
+  Future<String?> getSetting(String key) async {
+    await _ensureInitialized();
+    return _settingsBox!.get(key);
+  }
+
+  /// Persists a small free-form setting under [key].
+  Future<void> setSetting(String key, String value) async {
+    await _ensureInitialized();
+    await _settingsBox!.put(key, value);
+  }
+
+  /// Drops a persisted setting, e.g. when a cached protocol turns out to be
+  /// wrong and must be re-detected.
+  Future<void> removeSetting(String key) async {
+    await _ensureInitialized();
+    await _settingsBox!.delete(key);
   }
 }

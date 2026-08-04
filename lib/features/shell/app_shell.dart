@@ -49,7 +49,7 @@ class _AppShellState extends State<AppShell> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      extendBody: true,
+      extendBody: false,
       appBar: AppBar(
         title: Row(
           children: [

@@ -37,7 +37,7 @@ Future<void> main() async {
     await profileProvider.loadProfiles();
     final tripProvider = TripProvider(fileService, storage);
     await tripProvider.loadTrips();
-    final obdProvider = ObdProvider(ObdService());
+    final obdProvider = ObdProvider(ObdService(storage));
 
     final appState = AppState(
       profiles: profileProvider,

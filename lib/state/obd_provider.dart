@@ -2,31 +2,36 @@ import 'dart:async';
 import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 
-import '../core/constants/obd_pids.dart';
 import '../core/services/obd_service.dart';
-import '../core/utils/pid_support.dart';
+import '../core/utils/obd_frame_decoder.dart';
 
 /// Holds live telemetry decoded from the ELM327 and exposes it to the UI.
 ///
-/// Parses responses from bulk multi-PID commands shaped like
-/// `41 0C AA BB 0D XX 0B YY 10 ZZ ZZ 04 WW 0F VV`, i.e. one mode byte followed
-/// by repeated `PID + N data bytes` groups. This single-pass parser replaces
-/// the legacy per-PID switch-case and decouples parsing from the command
-/// that was sent — so if the ECU echoes PIDs out of order, we still decode.
+/// Frame parsing lives in [ObdFrameDecoder] — a pure, hardware-free class — so
+/// this provider only has to map decoded engineering values onto its public
+/// fields. Sampling is driven by [ObdService.onCycleComplete]: [onFrame] fires
+/// exactly once per completed poll cycle, never per response.
 class ObdProvider extends ChangeNotifier {
   ObdProvider(this._obdService) {
     _obdService.onDisconnected = _handleServiceDisconnected;
+    _obdService.onCycleComplete = _handleCycleComplete;
   }
 
   final ObdService _obdService;
+
+  static const ObdFrameDecoder _decoder = ObdFrameDecoder();
 
   BluetoothDevice? _connectedDevice;
   bool _connected = false;
   bool _live = false;
   VoidCallback? onFrame;
+
+  /// Fired when the transport drops while the provider was connected.
+  /// [onFrame] is deliberately NOT cleared, so a successful reconnect resumes
+  /// sampling with no further wiring.
+  void Function()? onConnectionLost;
 
   // Live telemetry fields. Kept public for simple widget access.
   double rpm = 0;
@@ -45,26 +50,35 @@ class ObdProvider extends ChangeNotifier {
   String? lastRawMessage;
   DateTime? lastUpdate;
   DateTime? _lastLogTime;
-  final Set<String> _cyclePidsSeen = <String>{};
   bool _disposed = false;
   bool _fuelRateProbed = false;
   int _framesDecoded = 0;
-  final PidSupport _pidSupport = PidSupport();
 
   // Short rolling window of fuel-flow samples to smooth the UI readout.
   static const int _smoothingWindowSize = 8;
   final Queue<double> _smoothFuelWindow = Queue<double>();
   double _smoothFuelSum = 0;
 
-  static const Set<String> _cycleCandidatePids = {
-    '010C', '010D', '010B', '0110', '0104', '010F',
-  };
-
   BluetoothDevice? get device => _connectedDevice;
+
+  /// Last device we were connected to, retained across a drop so reconnect
+  /// works.
+  BluetoothDevice? get lastDevice => _connectedDevice;
+
   bool get connected => _connected;
   bool get live => _live;
   int get framesDecoded => _framesDecoded;
-  Set<String> get supportedPids => _pidSupport.supportedPids;
+  Set<String> get supportedPids => _obdService.supportedPids;
+
+  /// True while the transport is still batching PIDs into bulk mode-01
+  /// requests; false once it has fallen back to one command per PID.
+  bool get bulkModeActive => _obdService.bulkModeActive;
+
+  /// ELM327 protocol digit currently in use, or null when unknown.
+  String? get activeProtocol => _obdService.activeProtocol;
+
+  /// Wall time of the last completed poll cycle, in milliseconds.
+  int get lastCycleMillis => _obdService.lastCycleMillis;
 
   double get smoothedFuelMlPerSec {
     if (_smoothFuelWindow.isEmpty) return 0;
@@ -79,9 +93,29 @@ class ObdProvider extends ChangeNotifier {
     _connectedDevice = device;
     _connected = true;
     _live = false;
-    _cyclePidsSeen.clear();
     _fuelRateProbed = false;
     _notifyIfActive();
+  }
+
+  /// Re-dials [lastDevice] and restarts the live stream. Returns true on
+  /// success. Safe to call repeatedly; no-op returning false when [lastDevice]
+  /// is null.
+  Future<bool> reconnect() async {
+    if (_disposed) return false;
+    final target = lastDevice;
+    if (target == null) return false;
+    try {
+      await _obdService.connect(target);
+      _connected = true;
+      _live = false;
+      _fuelRateProbed = false;
+      _notifyIfActive();
+      await startLive();
+      return live;
+    } catch (err) {
+      _log('reconnect failed: $err');
+      return false;
+    }
   }
 
   Future<String?> verifyConnection() async {
@@ -110,7 +144,6 @@ class ObdProvider extends ChangeNotifier {
   Future<void> stopLive() async {
     await _obdService.stopListening();
     _live = false;
-    _cyclePidsSeen.clear();
     _resetTelemetry();
     onFrame = null;
     _notifyIfActive();
@@ -121,7 +154,6 @@ class ObdProvider extends ChangeNotifier {
     _live = false;
     _connected = false;
     _connectedDevice = null;
-    _cyclePidsSeen.clear();
     _resetTelemetry();
     onFrame = null;
     lastRawMessage = null;
@@ -163,6 +195,8 @@ class ObdProvider extends ChangeNotifier {
     return smoothedFuelMlPerSec;
   }
 
+  /// Applies one complete transport response. Deliberately does NOT notify —
+  /// listeners are woken once per poll cycle from [_handleCycleComplete].
   void _handleObdData(String data) {
     if (_disposed) return;
     final trimmed = data.trim();
@@ -178,153 +212,73 @@ class ObdProvider extends ChangeNotifier {
     lastUpdate = DateTime.now();
     _framesDecoded += 1;
 
-    final colonIndex = data.indexOf(':');
-    final payload = colonIndex >= 0 ? data.substring(colonIndex + 1) : data;
-    final bytes = _parseHexBytes(payload);
-    if (bytes.isEmpty) {
-      _log('RAW no bytes in $data');
+    final result = _decoder.decode(data);
+    if (result.isEmpty) {
+      _log('RAW nothing decodable in $data');
       return;
     }
+    // Supported-PID bitmasks are owned by the service's PidSupport; the
+    // provider only consumes telemetry.
+    _applyValues(result.values);
+  }
 
-    final seen = <String>{};
-    _decodeMultiPidFrame(bytes, seen);
-    for (final pid in seen) {
-      _markPidForCycle(pid);
-    }
+  /// Fired once per completed poll cycle by [ObdService]. This is the ONLY
+  /// place [onFrame] fires, so trip sampling runs exactly once per cycle.
+  void _handleCycleComplete() {
+    if (_disposed) return;
+    onFrame?.call();
     _notifyIfActive();
   }
 
-  /// Decodes one or more `PID + dataBytes` groups packed in a single response.
-  ///
-  /// Mode 01 responses begin with 0x41. There can be multiple 0x41 blocks in
-  /// a multi-frame reply; each block is followed by repeating `pid + N` groups
-  /// until the next 0x41 or the end of the payload.
-  void _decodeMultiPidFrame(List<int> bytes, Set<String> seen) {
-    var i = 0;
-    while (i < bytes.length) {
-      final modeByte = bytes[i];
-
-      if (modeByte == 0x41) {
-        i += 1;
-        // Supported-PID bitmask responses (01 00, 01 20, 01 40) carry
-        // exactly 4 data bytes and we should not try to decode them as
-        // telemetry PIDs.
-        if (i < bytes.length &&
-            (bytes[i] == 0x00 || bytes[i] == 0x20 || bytes[i] == 0x40) &&
-            i + 5 <= bytes.length) {
-          _pidSupport.parseRange(bytes[i], bytes.sublist(i + 1, i + 5));
-          _log('PID support bitmask parsed for range 0x${bytes[i].toRadixString(16)}');
-          i += 5;
-          continue;
-        }
-        // Walk the inner run until we either exhaust the stream or bump into
-        // another 0x41 header which marks the next frame.
-        while (i < bytes.length && bytes[i] != 0x41) {
-          final pidByte = bytes[i];
-          final pidKey = '01${pidByte.toRadixString(16).padLeft(2, '0')}'
-              .toUpperCase();
-          final length = pidByteLength[pidKey];
-          if (length == null || i + 1 + length > bytes.length) {
-            i = bytes.length;
-            break;
-          }
-          final payload = bytes.sublist(i + 1, i + 1 + length);
-          _updatePid(pidKey, payload);
-          seen.add(pidKey);
-          i += 1 + length;
-        }
-        continue;
-      }
-
-      if (modeByte == 0x62 && i + 2 < bytes.length) {
-        // Mode 22 response: 62 PIDHI PIDLO DATA...
-        final pidKey = '22'
-            '${bytes[i + 1].toRadixString(16).padLeft(2, '0')}'
-            '${bytes[i + 2].toRadixString(16).padLeft(2, '0')}'.toUpperCase();
-        // Only MAF extended is handled today.
-        if ((pidKey == '220101' || pidKey == '2200101') &&
-            i + 4 < bytes.length) {
-          mafGramsPerSec = ((bytes[i + 3] * 256) + bytes[i + 4]) / 100;
-          seen.add('0110');
-          _log('EXT MAF=$mafGramsPerSec');
-          i += 5;
-          continue;
-        }
-        i += 3;
-        continue;
-      }
-
-      // Unknown byte — advance and keep scanning. This keeps us robust
-      // against CAN header garbage or stray bytes the plugin may leave in.
-      i += 1;
-    }
-  }
-
-  void _updatePid(String pid, List<int> data) {
-    switch (pid) {
-      case '010C':
-        if (data.length >= 2) rpm = ((data[0] * 256) + data[1]) / 4;
-        break;
-      case '010D':
-        speedKph = data[0].toDouble();
-        break;
-      case '010B':
-        mapKpa = data[0].toDouble();
-        break;
-      case '0110':
-        if (data.length >= 2) {
-          mafGramsPerSec = ((data[0] * 256) + data[1]) / 100;
-        }
-        break;
-      case '0104':
-        engineLoadPercent = (data[0] * 100) / 255;
-        break;
-      case '010F':
-        iatKelvin = (data[0] - 40) + 273.15;
-        break;
-      case '0105':
-        coolantKelvin = (data[0] - 40) + 273.15;
-        break;
-      case '0111':
-        throttlePercent = (data[0] * 100) / 255;
-        break;
-      case '0142':
-        if (data.length >= 2) {
-          batteryVolts = ((data[0] * 256) + data[1]) / 1000;
-        }
-        break;
-      case '012F':
-        fuelTankPercent = (data[0] * 100) / 255;
-        break;
-      case '0133':
-        baroKpa = data[0].toDouble();
-        break;
-      case '0144':
-        if (data.length >= 2) {
-          equivRatio = ((data[0] * 256) + data[1]) / 32768;
-        }
-        break;
-      case '015E':
-        if (data.length >= 2) {
-          final lph = ((data[0] * 256) + data[1]) / 20;
-          fuelRateMlPerSecDirect = (lph * 1000) / 3600;
-          if (!_fuelRateProbed && (fuelRateMlPerSecDirect ?? 0) > 0) {
+  void _applyValues(Map<String, double> values) {
+    for (final entry in values.entries) {
+      final value = entry.value;
+      switch (entry.key) {
+        case '010C':
+          rpm = value;
+          break;
+        case '010D':
+          speedKph = value;
+          break;
+        case '010B':
+          mapKpa = value;
+          break;
+        case '0110':
+          mafGramsPerSec = value;
+          break;
+        case '0104':
+          engineLoadPercent = value;
+          break;
+        case '010F':
+          iatKelvin = value;
+          break;
+        case '0105':
+          coolantKelvin = value;
+          break;
+        case '0111':
+          throttlePercent = value;
+          break;
+        case '0142':
+          batteryVolts = value;
+          break;
+        case '012F':
+          fuelTankPercent = value;
+          break;
+        case '0133':
+          baroKpa = value;
+          break;
+        case '0144':
+          equivRatio = value;
+          break;
+        case '015E':
+          fuelRateMlPerSecDirect = value;
+          if (!_fuelRateProbed && value > 0) {
             _fuelRateProbed = true;
             _obdService.enableFuelRatePid();
           }
-        }
-        break;
+          break;
+      }
     }
-  }
-
-  List<int> _parseHexBytes(String raw) {
-    final cleaned = raw.replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
-    final bytes = <int>[];
-    for (var i = 0; i + 1 < cleaned.length; i += 2) {
-      final value = int.tryParse(cleaned.substring(i, i + 2), radix: 16);
-      if (value != null) bytes.add(value);
-    }
-    return bytes;
   }
 
   void _log(String message) {
@@ -339,79 +293,23 @@ class ObdProvider extends ChangeNotifier {
     }
   }
 
+  /// A mid-trip drop must leave [onFrame] and [lastDevice] intact so
+  /// [reconnect] can resume sampling without any rewiring.
   void _handleServiceDisconnected() {
     _connected = false;
     _live = false;
-    _cyclePidsSeen.clear();
     _resetTelemetry();
-    onFrame = null;
     _notifyIfActive();
-  }
-
-  void _markPidForCycle(String pid) {
-    if (!_cycleCandidatePids.contains(pid)) return;
-    _cyclePidsSeen.add(pid);
-    if (_isCycleReadyForSampling()) {
-      _cyclePidsSeen.clear();
-      onFrame?.call();
-    }
-  }
-
-  bool _isCycleReadyForSampling() {
-    final hasRpm = _cyclePidsSeen.contains('010C');
-    final hasFuelSignal = _cyclePidsSeen.contains('0110') ||
-        _cyclePidsSeen.contains('010B');
-    return hasRpm && hasFuelSignal;
-  }
-
-  /// Reads stored DTCs (mode 03) and decodes them into standard OBD-II codes.
-  Future<List<String>> readDtc() async {
-    final raw = await _obdService.requestDtcRaw();
-    if (raw == null) return [];
-    return _decodeDtcResponse(raw);
-  }
-
-  Future<void> clearDtc() async {
-    await _obdService.clearDtc();
-  }
-
-  List<String> _decodeDtcResponse(String raw) {
-    final bytes = _parseHexBytes(raw);
-    // Mode 03 response: 43 followed by pairs of bytes per DTC.
-    final codes = <String>[];
-    var i = 0;
-    while (i < bytes.length) {
-      if (bytes[i] == 0x43) {
-        i += 1;
-        continue;
-      }
-      if (i + 1 >= bytes.length) break;
-      final a = bytes[i];
-      final b = bytes[i + 1];
-      if (a == 0 && b == 0) {
-        i += 2;
-        continue;
-      }
-      final category = (a >> 6) & 0x03;
-      final prefix = const ['P', 'C', 'B', 'U'][category];
-      final digit1 = (a >> 4) & 0x03;
-      final digit2 = a & 0x0F;
-      final digit3 = (b >> 4) & 0x0F;
-      final digit4 = b & 0x0F;
-      codes.add('$prefix$digit1'
-          '${digit2.toRadixString(16).toUpperCase()}'
-          '${digit3.toRadixString(16).toUpperCase()}'
-          '${digit4.toRadixString(16).toUpperCase()}');
-      i += 2;
-    }
-    return codes;
+    onConnectionLost?.call();
   }
 
   @override
   void dispose() {
     _disposed = true;
     onFrame = null;
+    onConnectionLost = null;
     _obdService.onDisconnected = null;
+    _obdService.onCycleComplete = null;
     unawaited(_obdService.disconnect(notify: false));
     super.dispose();
   }

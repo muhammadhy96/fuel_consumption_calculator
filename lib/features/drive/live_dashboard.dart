@@ -628,7 +628,7 @@ class _TripStatsCard extends StatelessWidget {
                   value: tripStats.costEstimate > 0
                       ? tripStats.costEstimate.toStringAsFixed(2)
                       : '--',
-                  unit: '€',
+                  unit: '\$',
                 ),
               ),
             ],

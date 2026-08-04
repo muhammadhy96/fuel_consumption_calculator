@@ -40,47 +40,27 @@ const Map<String, String> pidUnits = {
   '0133': 'kPa',
 };
 
-const String obdInitCommands = '''[
-  { "command": "AT Z",    "description": "reset", "status": true },
-  { "command": "AT E0",   "description": "echo off", "status": true },
-  { "command": "AT L0",   "description": "linefeeds off", "status": true },
-  { "command": "AT S0",   "description": "spaces off", "status": true },
-  { "command": "AT H0",   "description": "headers off", "status": true },
-  { "command": "AT SP 0", "description": "auto protocol", "status": true },
-  { "command": "AT AT2",  "description": "aggressive adaptive timing", "status": true },
-  { "command": "AT ST 19","description": "100ms timeout (25 x 4ms)", "status": true },
-  { "command": "AT CAF0", "description": "CAN auto format off", "status": true },
-  { "command": "01 00",   "description": "probe supported pids 01-20", "status": true },
-  { "command": "01 20",   "description": "probe supported pids 21-40", "status": true },
-  { "command": "01 40",   "description": "probe supported pids 41-60", "status": true }
-]''';
-
-/// Fast-poll bulk command: PIDs that drive live fuel-flow calculation.
-/// All six PIDs are requested in a single OBD frame, so the ELM327 returns
-/// them concatenated in a single response.
-const String fastBulkCommand = '01 0C 0D 0B 10 04 0F';
-
-/// Slow-poll bulk command: secondary telemetry refreshed at 0.5Hz.
-const String slowBulkCommand = '01 44 05 11 42 2F';
-
-/// Optional "premium" command tried once on connect — when the ECU supports
-/// direct fuel rate we use it instead of the MAF / MAP estimator.
-const String premiumFuelRateCommand = '01 5E';
-
-/// PID list matching [fastBulkCommand] — used to drive parsing and to know
-/// which PIDs to expect each cycle.
-const List<String> fastBulkPids = [
+/// Canonical poll PID keys, in priority order. Keys match [pidByteLength].
+const List<String> pollPidKeys = [
   '010C', '010D', '010B', '0110', '0104', '010F',
+  '0105', '0144', '0111', '0142', '012F',
 ];
 
-const List<String> slowBulkPids = [
-  '0144', '0105', '0111', '0142', '012F',
-];
+/// PIDs that must survive supported-PID filtering even if the ECU's bitmask
+/// omits them — losing these would break fuel math entirely.
+const Set<String> essentialPidKeys = {'010C', '010D', '010B', '0110'};
 
-/// Wraps [command] into the plugin's parameter JSON so we can send it via
-/// [Obd2Plugin.getParamsFromJSON]. We only care that the plugin transmits the
-/// raw OBD command — we do the decoding ourselves on the response.
-String buildBulkRequestJson(String command) {
-  return '[{"PID":"$command","length":0,"title":"BULK","unit":"",'
-      '"description":"<int>,[0]","status":true}]';
-}
+/// Max PIDs per bulk mode-01 request. ELM327 / ISO 15765-4 allows 6.
+const int maxPidsPerBulkRequest = 6;
+
+/// Optional direct fuel-rate PID — polled only when the ECU reports support.
+const String fuelRatePidKey = '015E';
+
+/// Init commands sent before protocol selection.
+const List<String> obdInitPrologue = ['AT E0', 'AT L0', 'AT S0', 'AT H0'];
+
+/// Init commands sent after protocol selection.
+const List<String> obdInitEpilogue = ['AT AT2', 'AT ST 19'];
+
+/// Supported-PID bitmask probe commands, in order.
+const List<String> pidSupportProbes = ['01 00', '01 20', '01 40'];

@@ -42,7 +42,9 @@ String formatDistance(double km) {
 
 String formatConsumption(double litersPer100Km) {
   if (litersPer100Km <= 0 || !litersPer100Km.isFinite) return '--';
-  return '${litersPer100Km.toStringAsFixed(1)} L/100km';
+  if (litersPer100Km >= 100) return '${litersPer100Km.toStringAsFixed(0)} L/100km';
+  if (litersPer100Km >= 10) return '${litersPer100Km.toStringAsFixed(1)} L/100km';
+  return '${litersPer100Km.toStringAsFixed(2)} L/100km';
 }
 
 String formatSpeed(double kmh) => '${kmh.toStringAsFixed(0)} km/h';

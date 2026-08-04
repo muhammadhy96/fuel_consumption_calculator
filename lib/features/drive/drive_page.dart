@@ -1,13 +1,15 @@
 import 'dart:async';
 
-import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/services/trip_foreground_service.dart';
 import '../../core/theme/app_theme.dart';
 import '../../features/drive/connect_button.dart';
+import '../../features/drive/fuel_chart_card.dart';
 import '../../features/drive/live_dashboard.dart';
 import '../../features/trips/trip_summary_page.dart';
 import '../../models/car_profile.dart';
@@ -28,15 +30,42 @@ class _DrivePageState extends State<DrivePage> {
   static const int _uiUpdateIntervalMs = 100;
   static const int _chartUpdateIntervalMs = 400;
 
+  /// Back-off schedule for the automatic reconnect loop.
+  static const List<Duration> _reconnectBackoff = [
+    Duration(seconds: 2),
+    Duration(seconds: 4),
+    Duration(seconds: 6),
+    Duration(seconds: 8),
+    Duration(seconds: 10),
+  ];
+
   double _fuelFlow = 0;
   double _timeSeconds = 0;
   LiveTripStats _tripStats = LiveTripStats.zero;
-  final List<FlSpot> _chartPoints = [];
-  final List<FlSpot> _rpmChartPoints = [];
-  final List<FlSpot> _speedChartPoints = [];
+  late final FuelChartController _chartController = FuelChartController();
+
+  /// Built once and reused so the 100 ms statistics [setState] hands the
+  /// element tree an identical widget instance — the chart subtree is then
+  /// skipped entirely instead of being rebuilt and re-laid-out.
+  late final Widget _chartCard = FuelChartCard(controller: _chartController);
   int _lastChartUpdateMs = 0;
   int _lastUiUpdateMs = 0;
   CarProfile? _activeProfile;
+
+  /// Bumped on every trip start/stop so an in-flight reconnect loop from a
+  /// previous trip can detect that it is stale and bail out.
+  int _tripSession = 0;
+
+  /// Trip session that currently owns the reconnect loop. Scoped per session
+  /// rather than a bare bool so a loop left sleeping by a previous trip cannot
+  /// swallow the next trip's connection-lost event (it is edge-triggered, so a
+  /// swallowed event is never retried).
+  int? _reconnectingSession;
+
+  /// Captured in [didChangeDependencies] so [dispose] never has to touch
+  /// `context` — the element is defunct by then and a provider lookup there
+  /// would strand every cleanup line after it.
+  ObdProvider? _obdRef;
 
   double _totalFuelMl = 0;
   double _distanceKm = 0;
@@ -49,27 +78,67 @@ class _DrivePageState extends State<DrivePage> {
   double _fuelPricePerLiter = 0;
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _obdRef = context.read<ObdProvider>();
+  }
+
+  @override
   void dispose() {
     _sampleStopwatch.stop();
-    final obd = context.read<ObdProvider>();
-    obd.onFrame = null;
-    unawaited(obd.stopLive());
+    // Bumping the session first makes any in-flight reconnect loop bail out
+    // (and undo a link it may have just re-established) instead of resurrecting
+    // the poll loop behind us.
+    _tripSession += 1;
+    _reconnectingSession = null;
+    // Local teardown runs before anything that could fail, so the foreground
+    // notification and the chart controller are always released.
+    unawaited(TripForegroundService.stop());
+    _chartController.dispose();
+    final obd = _obdRef;
+    if (obd != null) {
+      obd.onFrame = null;
+      obd.onConnectionLost = null;
+      unawaited(obd.stopLive());
+    }
     super.dispose();
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   }
 
   Future<bool> _requestPermissions() async {
     final scan = await Permission.bluetoothScan.request();
     final connect = await Permission.bluetoothConnect.request();
-    final location = await Permission.location.request();
-    final granted = scan.isGranted && connect.isGranted && location.isGranted;
+    // We no longer run a discovery scan, so location is not required on any
+    // API level for this flow. Ask for it (and for notifications, needed by
+    // the foreground-service notification on API 33+) without blocking.
+    unawaited(_requestOptionalPermissions());
+    final granted = scan.isGranted && connect.isGranted;
     if (!granted && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Bluetooth and location permissions are required.'),
+          content: Text('Bluetooth permissions are required.'),
         ),
       );
     }
     return granted;
+  }
+
+  /// Best-effort permissions. Their outcome never gates connecting.
+  Future<void> _requestOptionalPermissions() async {
+    try {
+      await Permission.location.request();
+      await Permission.notification.request();
+    } catch (err) {
+      if (kDebugMode) {
+        debugPrint('[DrivePage] optional permission request failed: $err');
+      }
+    }
   }
 
   Future<bool> _connectDevice() async {
@@ -138,11 +207,10 @@ class _DrivePageState extends State<DrivePage> {
     if (!mounted) return;
     tripProvider.startTrip(profile);
     _activeProfile = profile;
+    _tripSession += 1;
 
+    _chartController.clear();
     setState(() {
-      _chartPoints.clear();
-      _rpmChartPoints.clear();
-      _speedChartPoints.clear();
       _fuelFlow = 0;
       _timeSeconds = 0;
       _lastChartUpdateMs = 0;
@@ -161,7 +229,63 @@ class _DrivePageState extends State<DrivePage> {
       ..reset()
       ..start();
     obd.onFrame = _onObdFrame;
+    obd.onConnectionLost = _handleConnectionLost;
+    unawaited(TripForegroundService.start(profileName: profile.name));
   }
+
+  /// Called by [ObdProvider] when the transport drops mid-trip.
+  void _handleConnectionLost() {
+    if (!mounted) return;
+    unawaited(_runReconnectLoop());
+  }
+
+  /// Retries the OBD link with a widening back-off, keeping the trip alive.
+  ///
+  /// Re-entrancy guarded, and abandoned as soon as the widget is gone or the
+  /// trip it was started for has ended.
+  Future<void> _runReconnectLoop() async {
+    final session = _tripSession;
+    // Guard per session, not globally: a loop still sleeping on a back-off from
+    // an earlier trip must not cause this trip's event to be dropped.
+    if (_reconnectingSession == session) return;
+    _reconnectingSession = session;
+    final obd = _obdRef;
+    if (obd == null) return;
+    try {
+      _showSnack('OBD link lost — reconnecting…');
+      for (final delay in _reconnectBackoff) {
+        await Future<void>.delayed(delay);
+        if (_isStaleReconnect(session)) return;
+        var reconnected = false;
+        try {
+          reconnected = await obd.reconnect();
+        } catch (err) {
+          if (kDebugMode) {
+            debugPrint('[DrivePage] reconnect attempt failed: $err');
+          }
+        }
+        // reconnect() can outlive the trip: it re-dials AND restarts the poll
+        // loop, so if the trip ended while we were awaiting it we have to undo
+        // that here — nothing else will, and the loop would poll forever.
+        if (_isStaleReconnect(session)) {
+          if (reconnected) unawaited(obd.stopLive());
+          return;
+        }
+        if (reconnected) {
+          _showSnack('Reconnected');
+          return;
+        }
+      }
+      _showSnack('Could not reconnect — trip is still recording elapsed time.');
+    } finally {
+      if (_reconnectingSession == session) _reconnectingSession = null;
+    }
+  }
+
+  /// True once the trip this reconnect loop was started for has ended, or the
+  /// page is gone.
+  bool _isStaleReconnect(int session) =>
+      !mounted || session != _tripSession || _activeProfile == null;
 
   int _computeEcoScore(double rpm, double avgL100) {
     if (_distanceKm < 0.1) return 0;
@@ -272,6 +396,14 @@ class _DrivePageState extends State<DrivePage> {
     if (!shouldUpdateChart && !shouldUpdateUi) return;
     if (!mounted) return;
 
+    if (shouldUpdateChart) {
+      _lastChartUpdateMs = nowMs;
+      // The chart owns its own series and listens to the controller, so this
+      // does not rebuild the rest of the drive screen.
+      _chartController.addPoint(_timeSeconds, smoothFuel);
+    }
+    if (!shouldUpdateUi) return;
+
     final avgConsumption = _distanceKm > 0
         ? (_totalFuelMl / 1000) / _distanceKm * 100
         : 0.0;
@@ -282,30 +414,17 @@ class _DrivePageState extends State<DrivePage> {
     final ecoScore = _computeEcoScore(obd.rpm, avgConsumption);
 
     setState(() {
-      if (shouldUpdateUi) {
-        _fuelFlow = smoothFuel;
-        _lastUiUpdateMs = nowMs;
-        _tripStats = LiveTripStats(
-          totalFuelMl: _totalFuelMl,
-          distanceKm: _distanceKm,
-          avgConsumptionLPer100km: avgConsumption,
-          instantConsumptionLPer100km: instantConsumption,
-          costEstimate: costEstimate,
-          elapsedSeconds: trip.elapsedSeconds,
-          ecoScore: ecoScore,
-        );
-      }
-      if (shouldUpdateChart) {
-        _chartPoints.add(FlSpot(_timeSeconds, smoothFuel));
-        _rpmChartPoints.add(FlSpot(_timeSeconds, obd.rpm / 100));
-        _speedChartPoints.add(FlSpot(_timeSeconds, obd.speedKph / 10));
-        if (_chartPoints.length > 1500) {
-          _chartPoints.removeAt(0);
-          _rpmChartPoints.removeAt(0);
-          _speedChartPoints.removeAt(0);
-        }
-        _lastChartUpdateMs = nowMs;
-      }
+      _fuelFlow = smoothFuel;
+      _lastUiUpdateMs = nowMs;
+      _tripStats = LiveTripStats(
+        totalFuelMl: _totalFuelMl,
+        distanceKm: _distanceKm,
+        avgConsumptionLPer100km: avgConsumption,
+        instantConsumptionLPer100km: instantConsumption,
+        costEstimate: costEstimate,
+        elapsedSeconds: trip.elapsedSeconds,
+        ecoScore: ecoScore,
+      );
     });
   }
 
@@ -326,10 +445,13 @@ class _DrivePageState extends State<DrivePage> {
 
   Future<void> _stopTrip() async {
     _sampleStopwatch.stop();
+    _tripSession += 1;
     final obd = context.read<ObdProvider>();
     final profileProvider = context.read<ProfileProvider>();
     final tripProvider = context.read<TripProvider>();
     obd.onFrame = null;
+    obd.onConnectionLost = null;
+    await TripForegroundService.stop();
     try {
       await obd.stopLive();
     } catch (err) {
@@ -339,7 +461,9 @@ class _DrivePageState extends State<DrivePage> {
         );
       }
     }
-    final profile = profileProvider.selectedProfile;
+    // Same fallback as build(): a profile deleted mid-trip must not cost the
+    // user their trip summary.
+    final profile = profileProvider.selectedProfile ?? _activeProfile;
     final samplesSnapshot = List<TripSample>.from(tripProvider.samples);
     final trip = await tripProvider.stopTrip();
     _activeProfile = null;
@@ -358,7 +482,12 @@ class _DrivePageState extends State<DrivePage> {
 
   @override
   Widget build(BuildContext context) {
-    final profile = context.watch<ProfileProvider>().selectedProfile;
+    // Fall back to the trip's own profile: if the selected profile is deleted
+    // mid-trip we must keep rendering the dashboard, otherwise the placeholder
+    // replaces the STOP button and the timer, poll loop and foreground
+    // notification are left running with no way to end them.
+    final profile =
+        context.watch<ProfileProvider>().selectedProfile ?? _activeProfile;
     final tripRunning = context.select<TripProvider, bool>((t) => t.running);
     final connected = context.select<ObdProvider, bool>((o) => o.connected);
     if (profile == null) {
@@ -367,7 +496,7 @@ class _DrivePageState extends State<DrivePage> {
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
-      physics: const BouncingScrollPhysics(),
+      physics: const ClampingScrollPhysics(),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -377,7 +506,7 @@ class _DrivePageState extends State<DrivePage> {
             tripStats: _tripStats,
           ),
           const SizedBox(height: 18),
-          _buildChartCard(context),
+          _chartCard,
           const SizedBox(height: 18),
           _buildActionRow(tripRunning: tripRunning, connected: connected),
         ],
@@ -411,64 +540,6 @@ class _DrivePageState extends State<DrivePage> {
             ),
           ],
         ),
-      ),
-    );
-  }
-
-  Widget _buildChartCard(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 16, 14, 10),
-      decoration: BoxDecoration(
-        color: AppTheme.surfaceDarkElevated,
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: AppTheme.surfaceDarkOutline),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.show_chart,
-                  color: AppTheme.accentCyan, size: 18),
-              const SizedBox(width: 8),
-              Text(
-                'FUEL FLOW · LAST 60 s',
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.7),
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1.4,
-                ),
-              ),
-              const Spacer(),
-              Text(
-                '${_fuelFlow.toStringAsFixed(2)} mL/s',
-                style: const TextStyle(
-                  color: AppTheme.accentCyan,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              _LegendDot(color: AppTheme.accentCyan, label: 'Fuel'),
-              const SizedBox(width: 12),
-              _LegendDot(
-                  color: AppTheme.accentAmber.withValues(alpha: 0.7),
-                  label: 'RPM/100'),
-              const SizedBox(width: 12),
-              _LegendDot(
-                  color: AppTheme.accentLime.withValues(alpha: 0.6),
-                  label: 'Speed/10'),
-            ],
-          ),
-          const SizedBox(height: 10),
-          RepaintBoundary(
-            child: SizedBox(height: 220, child: LineChart(_buildFuelChart())),
-          ),
-        ],
       ),
     );
   }
@@ -518,135 +589,6 @@ class _DrivePageState extends State<DrivePage> {
           onPressed: _connectDevice,
         ),
       ],
-    );
-  }
-
-  LineChartData _buildFuelChart() {
-    if (_chartPoints.isEmpty) {
-      return _chartDataFor(
-        points: const [FlSpot(0, 0)],
-        viewStart: 0,
-        viewEnd: 1,
-      );
-    }
-    final maxX = _chartPoints.last.x;
-    final viewStart = maxX > 60 ? maxX - 60 : 0.0;
-    final visiblePoints = [
-      for (final p in _chartPoints)
-        if (p.x >= viewStart) p,
-    ];
-    final safePoints = visiblePoints.isEmpty
-        ? const [FlSpot(0, 0)]
-        : visiblePoints;
-    return _chartDataFor(
-      points: safePoints,
-      viewStart: viewStart,
-      viewEnd: maxX,
-    );
-  }
-
-  List<FlSpot> _filterVisible(List<FlSpot> points, double viewStart) {
-    return [for (final p in points) if (p.x >= viewStart) p];
-  }
-
-  LineChartData _chartDataFor({
-    required List<FlSpot> points,
-    required double viewStart,
-    required double viewEnd,
-  }) {
-    final adjustedEnd = viewEnd == viewStart ? viewStart + 1 : viewEnd;
-    final rpmVisible = _filterVisible(_rpmChartPoints, viewStart);
-    final speedVisible = _filterVisible(_speedChartPoints, viewStart);
-
-    return LineChartData(
-      minX: viewStart,
-      maxX: adjustedEnd,
-      minY: 0,
-      clipData: const FlClipData.all(),
-      borderData: FlBorderData(show: false),
-      lineBarsData: [
-        LineChartBarData(
-          spots: points,
-          isCurved: true,
-          curveSmoothness: 0.25,
-          color: AppTheme.accentCyan,
-          barWidth: 2.5,
-          dotData: const FlDotData(show: false),
-          belowBarData: BarAreaData(
-            show: true,
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [
-                AppTheme.accentCyan.withValues(alpha: 0.35),
-                AppTheme.accentCyan.withValues(alpha: 0.0),
-              ],
-            ),
-          ),
-        ),
-        if (rpmVisible.length > 1)
-          LineChartBarData(
-            spots: rpmVisible,
-            isCurved: true,
-            curveSmoothness: 0.2,
-            color: AppTheme.accentAmber.withValues(alpha: 0.5),
-            barWidth: 1.2,
-            dotData: const FlDotData(show: false),
-          ),
-        if (speedVisible.length > 1)
-          LineChartBarData(
-            spots: speedVisible,
-            isCurved: true,
-            curveSmoothness: 0.2,
-            color: AppTheme.accentLime.withValues(alpha: 0.4),
-            barWidth: 1.2,
-            dotData: const FlDotData(show: false),
-          ),
-      ],
-      gridData: FlGridData(
-        show: true,
-        drawVerticalLine: false,
-        getDrawingHorizontalLine: (_) => FlLine(
-          color: Colors.white.withValues(alpha: 0.06),
-          strokeWidth: 1,
-        ),
-      ),
-      titlesData: FlTitlesData(
-        topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-        rightTitles:
-            const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-        bottomTitles: AxisTitles(
-          sideTitles: SideTitles(
-            showTitles: true,
-            interval: 10,
-            reservedSize: 24,
-            getTitlesWidget: (value, meta) => Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text(
-                '${value.toInt()}s',
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.4),
-                  fontSize: 10,
-                ),
-              ),
-            ),
-          ),
-        ),
-        leftTitles: AxisTitles(
-          sideTitles: SideTitles(
-            showTitles: true,
-            interval: 5,
-            reservedSize: 32,
-            getTitlesWidget: (value, meta) => Text(
-              value.toStringAsFixed(0),
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.4),
-                fontSize: 10,
-              ),
-            ),
-          ),
-        ),
-      ),
     );
   }
 }
@@ -732,33 +674,3 @@ class _DeviceDialog extends StatelessWidget {
   }
 }
 
-class _LegendDot extends StatelessWidget {
-  const _LegendDot({required this.color, required this.label});
-  final Color color;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 8,
-          height: 8,
-          decoration: BoxDecoration(
-            color: color,
-            shape: BoxShape.circle,
-          ),
-        ),
-        const SizedBox(width: 4),
-        Text(
-          label,
-          style: TextStyle(
-            color: Colors.white.withValues(alpha: 0.45),
-            fontSize: 10,
-          ),
-        ),
-      ],
-    );
-  }
-}

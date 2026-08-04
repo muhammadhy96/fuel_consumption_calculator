@@ -61,6 +61,7 @@ class _TripDetailsPageState extends State<TripDetailsPage> {
   }
 
   Future<void> _deleteTrip() async {
+    final trips = context.read<TripProvider>();
     final confirmed = await showConfirmDialog(
       context: context,
       title: 'Delete trip',
@@ -69,11 +70,12 @@ class _TripDetailsPageState extends State<TripDetailsPage> {
     if (!confirmed) return;
     final profileId = widget.arguments.trip.profileId;
     final tripId = widget.arguments.trip.id;
-    await context.read<TripProvider>().deleteTrip(profileId, tripId);
+    await trips.deleteTrip(profileId, tripId);
     if (!mounted) return;
-    Navigator.of(context).pop();
-    ScaffoldMessenger.of(context)
-        .showSnackBar(const SnackBar(content: Text('Trip deleted')));
+    final navigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    navigator.pop();
+    messenger.showSnackBar(const SnackBar(content: Text('Trip deleted')));
   }
 
   @override
