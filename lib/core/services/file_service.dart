@@ -29,6 +29,7 @@ const List<String> _tripCsvHeader = [
   'STFT (%)',
   'LTFT (%)',
   'Fuel System Status',
+  'Abs Load (%)',
 ];
 
 /// Incremental trip CSV writer.

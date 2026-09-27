@@ -8,7 +8,7 @@ import '../core/services/obd_service.dart';
 import '../core/utils/obd_frame_decoder.dart';
 
 /// Where the current fuel-flow figure comes from.
-enum FuelSource { direct, maf, speedDensity, none }
+enum FuelSource { direct, maf, absoluteLoad, speedDensity, none }
 
 /// Holds live telemetry decoded from the ELM327 and exposes it to the UI.
 ///
@@ -45,6 +45,8 @@ class ObdProvider extends ChangeNotifier {
   double stftPercent = 0;
   double ltftPercent = 0;
   int? fuelSystemStatus;
+  double? absoluteLoadPercent;
+  bool _absoluteLoadSeen = false;
   double iatKelvin = 0;
   double coolantKelvin = 0;
   double throttlePercent = 0;
@@ -201,6 +203,13 @@ class ObdProvider extends ChangeNotifier {
       return FuelSource.direct;
     }
     if (mafGramsPerSec > 0 && _isFresh('0110')) return FuelSource.maf;
+    // Once 0143 has reported a positive value it is trusted, including the
+    // near-zero readings it gives on overrun.
+    if (_absoluteLoadSeen &&
+        absoluteLoadPercent != null &&
+        _isFresh('0143')) {
+      return FuelSource.absoluteLoad;
+    }
     if (mapKpa > 0 && _isFresh('010B')) return FuelSource.speedDensity;
     return FuelSource.none;
   }
@@ -226,6 +235,7 @@ class ObdProvider extends ChangeNotifier {
       case FuelSource.direct:
         return fuelRateMlPerSecDirect!;
       case FuelSource.maf:
+      case FuelSource.absoluteLoad:
       case FuelSource.speedDensity:
         break;
     }
@@ -251,7 +261,17 @@ class ObdProvider extends ChangeNotifier {
       engineDisplacementLiters: engineDisplacementLiters,
       fuelType: fuelType,
       equivRatio: lambda ?? 1.0,
-      mafGramsPerSec: source == FuelSource.maf ? mafGramsPerSec : null,
+      // Measured (MAF) or ECU-modelled (absolute load) air replaces the
+      // speed-density estimate.
+      mafGramsPerSec: switch (source) {
+        FuelSource.maf => mafGramsPerSec,
+        FuelSource.absoluteLoad => ObdService.airFromAbsoluteLoad(
+            absoluteLoadPercent: absoluteLoadPercent!,
+            rpm: rpm,
+            engineDisplacementLiters: engineDisplacementLiters,
+          ),
+        _ => null,
+      },
       stftPercent: _isFresh('0106') ? stftPercent : 0,
       ltftPercent: _isFresh('0107') ? ltftPercent : 0,
     );
@@ -362,6 +382,10 @@ class ObdProvider extends ChangeNotifier {
         case '0144':
           equivRatio = value;
           break;
+        case '0143':
+          absoluteLoadPercent = value;
+          if (value > 0) _absoluteLoadSeen = true;
+          break;
         case '0103':
           fuelSystemStatus = value.toInt();
           break;
@@ -429,6 +453,8 @@ class ObdProvider extends ChangeNotifier {
     stftPercent = 0;
     ltftPercent = 0;
     fuelSystemStatus = null;
+    absoluteLoadPercent = null;
+    _absoluteLoadSeen = false;
     iatKelvin = 0;
     coolantKelvin = 0;
     throttlePercent = 0;

@@ -14,6 +14,7 @@ class ObdDecodeResult {
   ///   '012F' percent        '0133' kPa         '0144' ratio (lambda)
   ///   '0106' percent        '0107' percent     (fuel trims, -100..+99.2)
   ///   '0103' bank-1 fuel system status byte (0x04 = open loop / fuel cut)
+  ///   '0143' percent (absolute load, may exceed 100 on boosted engines)
   ///   '015E' mL/s           (already converted from L/h)
   final Map<String, double> values;
 
@@ -199,6 +200,12 @@ class ObdFrameDecoder {
       case '0142':
         if (dataLength >= 2) {
           values[pidKey] = ((bytes[start] * 256) + bytes[start + 1]) / 1000;
+        }
+        break;
+      case '0143':
+        if (dataLength >= 2) {
+          values[pidKey] =
+              ((bytes[start] * 256) + bytes[start + 1]) * 100 / 255;
         }
         break;
       case '0144':

@@ -530,6 +530,33 @@ void main() {
       expect(cut(throttle: 12.2, closedThrottle: 12.2, status: 0x01), isTrue);
     });
   });
+  group('absolute load air mass', () {
+    test('100 % load on a 2.0 L engine at 3000 rpm', () {
+      // 1.0 * 1.184 * 2.0 * 3000 / 120 = 59.2 g/s
+      expect(
+        ObdService.airFromAbsoluteLoad(
+          absoluteLoadPercent: 100,
+          rpm: 3000,
+          engineDisplacementLiters: 2.0,
+        ),
+        closeTo(59.2, 1e-9),
+      );
+    });
+
+    test('zero load or a stopped engine yields no air', () {
+      expect(
+        ObdService.airFromAbsoluteLoad(
+            absoluteLoadPercent: 0, rpm: 2000, engineDisplacementLiters: 1.4),
+        0,
+      );
+      expect(
+        ObdService.airFromAbsoluteLoad(
+            absoluteLoadPercent: 40, rpm: 0, engineDisplacementLiters: 1.4),
+        0,
+      );
+    });
+  });
+
   group('fuel trims', () {
     test('STFT + LTFT scale fuel mass by (1 + sum/100)', () {
       final value = service.fuelFlow(

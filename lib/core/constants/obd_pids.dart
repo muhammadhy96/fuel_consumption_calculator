@@ -24,6 +24,7 @@ const Map<String, int> pidByteLength = {
   '0106': 1, // Short-term fuel trim, bank 1
   '0107': 1, // Long-term fuel trim, bank 1
   '0103': 2, // Fuel system status (A = bank 1, B = bank 2)
+  '0143': 2, // Absolute load value
 };
 
 /// Human readable units — used by the dashboard.
@@ -44,12 +45,13 @@ const Map<String, String> pidUnits = {
   '0106': '%',
   '0107': '%',
   '0103': '',
+  '0143': '%',
 };
 
 /// Canonical poll PID keys, in priority order. Keys match [pidByteLength].
 const List<String> pollPidKeys = [
   '010C', '010D', '010B', '0110', '0104', '010F',
-  '0105', '0144', '0106', '0107', '0103', '0111', '0142', '012F',
+  '0105', '0144', '0106', '0107', '0103', '0111', '0142', '0143', '012F',
 ];
 
 /// PIDs that must survive supported-PID filtering even if the ECU's bitmask

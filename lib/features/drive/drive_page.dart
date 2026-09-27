@@ -406,6 +406,7 @@ class _DrivePageState extends State<DrivePage> {
       stftPercent: obd.stftPercent,
       ltftPercent: obd.ltftPercent,
       fuelSystemStatus: obd.fuelSystemStatus ?? 0,
+      absoluteLoadPercent: obd.absoluteLoadPercent ?? 0,
     );
     trip.addSample(sample);
 

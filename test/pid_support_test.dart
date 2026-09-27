@@ -280,12 +280,12 @@ void main() {
   group('buildBulkCommands', () {
     final support = PidSupport();
 
-    test('packs the 14 poll PIDs into three commands, chunked at 6', () {
+    test('packs the 15 poll PIDs into three commands, chunked at 6', () {
       expect(maxPidsPerBulkRequest, 6);
       expect(support.buildBulkCommands(pollPidKeys), [
         '01 0C 0D 0B 10 04 0F',
         '01 05 44 06 07 03 11',
-        '01 42 2F',
+        '01 42 43 2F',
       ]);
     });
 
@@ -349,6 +349,7 @@ void main() {
         '01 03',
         '01 11',
         '01 42',
+        '01 43',
         '01 2F',
       ]);
     });

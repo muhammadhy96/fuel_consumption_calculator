@@ -312,6 +312,8 @@ class _FuelFlowHero extends StatelessWidget {
           return 'PID 015E';
         case FuelSource.maf:
           return 'MAF Sensor';
+        case FuelSource.absoluteLoad:
+          return 'Absolute Load';
         case FuelSource.speedDensity:
           return 'Speed-Density';
         case FuelSource.none:

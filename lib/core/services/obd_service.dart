@@ -702,6 +702,23 @@ class ObdService {
     return (gramsOfFuel / densityGramsPerLiter) * 1000;
   }
 
+  /// Air mass flow (g/s) implied by PID 0143. SAE J1979 defines absolute load
+  /// as air mass per intake stroke / (1.184 g/L * cylinder displacement), and
+  /// a four-stroke engine takes displacement worth of strokes every 2 revs:
+  ///   m_air = LOAD_ABS/100 * 1.184 * displacement * RPM / 120
+  static double airFromAbsoluteLoad({
+    required double absoluteLoadPercent,
+    required double rpm,
+    required double engineDisplacementLiters,
+  }) {
+    if (absoluteLoadPercent <= 0 || rpm <= 0) return 0;
+    return absoluteLoadPercent / 100 *
+        1.184 *
+        engineDisplacementLiters *
+        rpm /
+        120;
+  }
+
   /// Multiplier (1 + (STFT + LTFT) / 100). Non-finite trims count as 0 and the
   /// combined trim is clamped to ±50 %, well past any healthy ECU's limits,
   /// so a garbage frame cannot blow up the estimate.
