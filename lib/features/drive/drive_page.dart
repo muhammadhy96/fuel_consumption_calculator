@@ -554,6 +554,8 @@ class _DrivePageState extends State<DrivePage> {
         ? (_activeProfile ?? selected)
         : (selected ?? _activeProfile);
     final connected = context.select<ObdProvider, bool>((o) => o.connected);
+    final connectionType =
+        context.select<ObdProvider, ObdConnectionType?>((o) => o.device?.type);
     if (profile == null) {
       return _buildNoProfile(context);
     }
@@ -572,7 +574,11 @@ class _DrivePageState extends State<DrivePage> {
           const SizedBox(height: 18),
           _chartCard,
           const SizedBox(height: 18),
-          _buildActionRow(tripRunning: tripRunning, connected: connected),
+          _buildActionRow(
+            tripRunning: tripRunning,
+            connected: connected,
+            connectionType: connectionType,
+          ),
         ],
       ),
     );
@@ -608,7 +614,11 @@ class _DrivePageState extends State<DrivePage> {
     );
   }
 
-  Widget _buildActionRow({required bool tripRunning, required bool connected}) {
+  Widget _buildActionRow({
+    required bool tripRunning,
+    required bool connected,
+    required ObdConnectionType? connectionType,
+  }) {
     return Row(
       children: [
         Expanded(
@@ -649,6 +659,7 @@ class _DrivePageState extends State<DrivePage> {
         const SizedBox(width: 10),
         ConnectButton(
           connected: connected,
+          connectionType: connectionType,
           tripRunning: tripRunning,
           onPressed: _connectDevice,
         ),

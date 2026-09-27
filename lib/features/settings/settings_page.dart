@@ -19,7 +19,7 @@ class SettingsPage extends StatelessWidget {
         children: [
           _Section(
             title: 'OBD DIAGNOSTICS',
-            icon: Icons.bluetooth_connected,
+            icon: Icons.cable,
             children: [const _ObdDiagnostics()],
           ),
           const SizedBox(height: 14),
