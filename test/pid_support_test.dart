@@ -212,8 +212,8 @@ void main() {
 
     test('keeps only supported PIDs and preserves pollPidKeys ordering', () {
       final support = PidSupport()..parseRawResponse('4100BE3EB813');
-      // pollPidKeys order is 0C 0D 0B 10 04 0F 05 44 11 42 2F; the mask above
-      // supports 0C 0D 0B 04 0F 05 11 and not 10 44 42 2F.
+      // pollPidKeys order is 0C 0D 0B 10 04 0F 05 44 06 07 11 42 2F; the mask
+      // above supports 0C 0D 0B 04 0F 05 06 07 11 and not 10 44 42 2F.
       expect(support.filter(pollPidKeys), [
         '010C',
         '010D',
@@ -221,6 +221,8 @@ void main() {
         '0104',
         '010F',
         '0105',
+        '0106',
+        '0107',
         '0111',
       ]);
     });
@@ -277,11 +279,12 @@ void main() {
   group('buildBulkCommands', () {
     final support = PidSupport();
 
-    test('packs the 11 poll PIDs into two commands, chunked at 6', () {
+    test('packs the 13 poll PIDs into three commands, chunked at 6', () {
       expect(maxPidsPerBulkRequest, 6);
       expect(support.buildBulkCommands(pollPidKeys), [
         '01 0C 0D 0B 10 04 0F',
-        '01 05 44 11 42 2F',
+        '01 05 44 06 07 11 42',
+        '01 2F',
       ]);
     });
 
@@ -304,7 +307,7 @@ void main() {
     });
 
     test('12 PIDs split 6 + 6 and 13 split 6 + 6 + 1', () {
-      final twelve = [...pollPidKeys, '015E'];
+      final twelve = [...pollPidKeys.take(11), '015E'];
       expect(support.buildBulkCommands(twelve).length, 2);
       final thirteen = [...twelve, '0133'];
       final commands = support.buildBulkCommands(thirteen);
@@ -340,6 +343,8 @@ void main() {
         '01 0F',
         '01 05',
         '01 44',
+        '01 06',
+        '01 07',
         '01 11',
         '01 42',
         '01 2F',
@@ -383,6 +388,32 @@ void main() {
 
     test('the poll list has no duplicates', () {
       expect(pollPidKeys.toSet().length, pollPidKeys.length);
+    });
+  });
+
+  group('parseRawResponse with several ECUs', () {
+    test('masks from every answering ECU are merged', () {
+      // Gearbox (TCM) first, then the engine (ECM), as CAN may deliver them.
+      final support = PidSupport()
+        ..parseRawResponse('4100800000014100BE3EB813');
+      expect(support.isSupported('0101'), isTrue);
+      expect(support.isSupported('010C'), isTrue);
+      expect(support.isSupported('010F'), isTrue);
+      expect(support.isSupported('0120'), isTrue);
+    });
+
+    test('a BUS INIT status prefix does not shift the bytes', () {
+      final support = PidSupport()
+        ..parseRawResponse(' BUS INIT: ...OK4100BE3EB813');
+      expect(support.isSupported('010C'), isTrue);
+      expect(support.isSupported('010D'), isTrue);
+      expect(support.isSupported('0110'), isFalse);
+    });
+
+    test('a SEARCHING prefix does not shift the bytes', () {
+      final support = PidSupport()
+        ..parseRawResponse('SEARCHING...4100BE3EB813');
+      expect(support.isSupported('010C'), isTrue);
     });
   });
 }

@@ -9,6 +9,8 @@ class TripSample {
     required this.engineLoadPercent,
     required this.mafGramsPerSec,
     required this.equivRatio,
+    this.stftPercent = 0,
+    this.ltftPercent = 0,
   });
 
   final double timeSeconds;
@@ -20,6 +22,8 @@ class TripSample {
   final double engineLoadPercent;
   final double mafGramsPerSec;
   final double equivRatio;
+  final double stftPercent;
+  final double ltftPercent;
 
   List<dynamic> toCsvRow() => [
         timeSeconds,
@@ -31,10 +35,13 @@ class TripSample {
         engineLoadPercent,
         mafGramsPerSec,
         equivRatio,
+        stftPercent,
+        ltftPercent,
       ];
 
   factory TripSample.fromCsvRow(List<dynamic> row) {
     final hasExtended = row.length >= 9;
+    final hasTrims = row.length >= 11;
     final hasSpeed = row.length >= 6;
     final double speed = hasSpeed ? (row[3] as num).toDouble() : 0.0;
     final iatIndex = hasSpeed ? 4 : 3;
@@ -49,6 +56,8 @@ class TripSample {
       engineLoadPercent: hasExtended ? (row[6] as num).toDouble() : 0.0,
       mafGramsPerSec: hasExtended ? (row[7] as num).toDouble() : 0.0,
       equivRatio: hasExtended ? (row[8] as num).toDouble() : 1.0,
+      stftPercent: hasTrims ? (row[9] as num).toDouble() : 0.0,
+      ltftPercent: hasTrims ? (row[10] as num).toDouble() : 0.0,
     );
   }
 }

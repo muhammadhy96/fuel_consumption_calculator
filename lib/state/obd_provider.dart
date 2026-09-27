@@ -7,6 +7,9 @@ import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import '../core/services/obd_service.dart';
 import '../core/utils/obd_frame_decoder.dart';
 
+/// Where the current fuel-flow figure comes from.
+enum FuelSource { direct, maf, speedDensity, none }
+
 /// Holds live telemetry decoded from the ELM327 and exposes it to the UI.
 ///
 /// Frame parsing lives in [ObdFrameDecoder] — a pure, hardware-free class — so
@@ -39,6 +42,8 @@ class ObdProvider extends ChangeNotifier {
   double speedKph = 0;
   double mafGramsPerSec = 0;
   double equivRatio = 1.0;
+  double stftPercent = 0;
+  double ltftPercent = 0;
   double iatKelvin = 0;
   double coolantKelvin = 0;
   double throttlePercent = 0;
@@ -53,6 +58,18 @@ class ObdProvider extends ChangeNotifier {
   bool _disposed = false;
   bool _fuelRateProbed = false;
   int _framesDecoded = 0;
+
+  /// A PID not decoded for this long is treated as unknown, so a stalled
+  /// adapter or a switched-off ECU cannot keep feeding its last value into
+  /// the trip.
+  static const int freshnessWindowMs = 4000;
+
+  final Stopwatch _clock = Stopwatch()..start();
+  final Map<String, int> _decodedAtMs = {};
+
+  /// Throttle reading learned at idle (and lowered by any lower reading),
+  /// used to recognise a closed throttle during deceleration fuel cut-off.
+  double? _closedThrottlePercent;
 
   // Short rolling window of fuel-flow samples to smooth the UI readout.
   static const int _smoothingWindowSize = 8;
@@ -90,10 +107,14 @@ class ObdProvider extends ChangeNotifier {
 
   Future<void> connect(BluetoothDevice device) async {
     await _obdService.connect(device);
+    if (_connectedDevice?.address != device.address) {
+      _closedThrottlePercent = null;
+    }
     _connectedDevice = device;
     _connected = true;
     _live = false;
     _fuelRateProbed = false;
+    _decodedAtMs.clear();
     _notifyIfActive();
   }
 
@@ -109,6 +130,7 @@ class ObdProvider extends ChangeNotifier {
       _connected = true;
       _live = false;
       _fuelRateProbed = false;
+      _decodedAtMs.clear();
       _notifyIfActive();
       await startLive();
       return live;
@@ -161,26 +183,75 @@ class ObdProvider extends ChangeNotifier {
     _notifyIfActive();
   }
 
+  bool _isFresh(String pid) {
+    final at = _decodedAtMs[pid];
+    return at != null && _clock.elapsedMilliseconds - at <= freshnessWindowMs;
+  }
+
+  /// True once PID 015E has reported a positive rate this session. From then
+  /// on its readings, including 0 during fuel cut-off, are authoritative.
+  bool get directFuelRateActive => _fuelRateProbed;
+
+  FuelSource get fuelSource {
+    if (!_connected) return FuelSource.none;
+    if (_fuelRateProbed &&
+        fuelRateMlPerSecDirect != null &&
+        _isFresh('015E')) {
+      return FuelSource.direct;
+    }
+    if (mafGramsPerSec > 0 && _isFresh('0110')) return FuelSource.maf;
+    if (mapKpa > 0 && _isFresh('010B')) return FuelSource.speedDensity;
+    return FuelSource.none;
+  }
+
+  /// True when the inputs of the current sample were actually decoded within
+  /// [freshnessWindowMs]: RPM, speed (once the car has reported it) and the
+  /// fuel source. A stale sample must not be integrated into a trip.
+  bool get telemetryFresh {
+    if (!_isFresh('010C')) return false;
+    if (_decodedAtMs.containsKey('010D') && !_isFresh('010D')) return false;
+    return fuelSource != FuelSource.none;
+  }
+
   double calculateFuelFlow({
     required double volumetricEfficiency,
     required double engineDisplacementLiters,
-    double equivRatio = 1.0,
+    required String fuelType,
   }) {
-    if (fuelRateMlPerSecDirect != null && fuelRateMlPerSecDirect! > 0) {
-      return fuelRateMlPerSecDirect!;
+    final source = fuelSource;
+    switch (source) {
+      case FuelSource.none:
+        return 0;
+      case FuelSource.direct:
+        return fuelRateMlPerSecDirect!;
+      case FuelSource.maf:
+      case FuelSource.speedDensity:
+        break;
     }
-    if (!_connected) return 0;
-    final vePercent = engineLoadPercent ?? volumetricEfficiency;
-    final iat = iatKelvin > 0 ? iatKelvin : 293.15;
-    final maf = mafGramsPerSec > 0 ? mafGramsPerSec : null;
+    final lambda = _isFresh('0144') ? equivRatio : null;
+    final fuelCut = ObdService.isOverrunFuelCut(
+      rpm: rpm,
+      speedKph: _isFresh('010D') ? speedKph : 0,
+      isDiesel: fuelType.toLowerCase() == 'diesel',
+      throttlePercent: _isFresh('0111') ? throttlePercent : null,
+      closedThrottlePercent: _closedThrottlePercent,
+      mapKpa: _isFresh('010B') ? mapKpa : null,
+      baroKpa: _isFresh('0133') ? baroKpa : null,
+      lambda: lambda,
+    );
+    if (fuelCut) return 0;
+    final iat = iatKelvin > 0 && _isFresh('010F') ? iatKelvin : 293.15;
     return _obdService.fuelFlow(
       rpm,
       mapKpa,
       iat,
-      volumetricEfficiency: vePercent,
+      volumetricEfficiency: volumetricEfficiency,
       engineDisplacementLiters: engineDisplacementLiters,
-      equivRatio: equivRatio,
-      mafGramsPerSec: maf,
+      fuelType: fuelType,
+      equivRatio: lambda ?? 1.0,
+      mafGramsPerSec: source == FuelSource.maf ? mafGramsPerSec : null,
+      stftPercent: _isFresh('0106') ? stftPercent : 0,
+      ltftPercent: _isFresh('0107') ? ltftPercent : 0,
     );
   }
 
@@ -226,13 +297,32 @@ class ObdProvider extends ChangeNotifier {
   /// place [onFrame] fires, so trip sampling runs exactly once per cycle.
   void _handleCycleComplete() {
     if (_disposed) return;
+    _learnClosedThrottle();
     onFrame?.call();
     _notifyIfActive();
   }
 
+  void _learnClosedThrottle() {
+    if (!_isFresh('0111') || !_isFresh('010C')) return;
+    final closed = _closedThrottlePercent;
+    final atIdle = rpm > 0 &&
+        rpm < ObdService.fuelCutMinRpm &&
+        _isFresh('010D') &&
+        speedKph < 3;
+    if (atIdle) {
+      _closedThrottlePercent =
+          closed == null || throttlePercent < closed ? throttlePercent : closed;
+    } else if (closed != null && throttlePercent < closed) {
+      // Drive-by-wire throttles close further on overrun than at idle.
+      _closedThrottlePercent = throttlePercent;
+    }
+  }
+
   void _applyValues(Map<String, double> values) {
+    final nowMs = _clock.elapsedMilliseconds;
     for (final entry in values.entries) {
       final value = entry.value;
+      _decodedAtMs[entry.key] = nowMs;
       switch (entry.key) {
         case '010C':
           rpm = value;
@@ -269,6 +359,12 @@ class ObdProvider extends ChangeNotifier {
           break;
         case '0144':
           equivRatio = value;
+          break;
+        case '0106':
+          stftPercent = value;
+          break;
+        case '0107':
+          ltftPercent = value;
           break;
         case '015E':
           fuelRateMlPerSecDirect = value;
@@ -325,6 +421,8 @@ class ObdProvider extends ChangeNotifier {
     speedKph = 0;
     mafGramsPerSec = 0;
     equivRatio = 1.0;
+    stftPercent = 0;
+    ltftPercent = 0;
     iatKelvin = 0;
     coolantKelvin = 0;
     throttlePercent = 0;
@@ -333,6 +431,7 @@ class ObdProvider extends ChangeNotifier {
     fuelTankPercent = null;
     fuelRateMlPerSecDirect = null;
     baroKpa = null;
+    _decodedAtMs.clear();
     _smoothFuelWindow.clear();
     _smoothFuelSum = 0;
     _framesDecoded = 0;

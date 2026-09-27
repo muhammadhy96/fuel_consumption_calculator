@@ -10,6 +10,7 @@ class Trip {
     this.distanceKm = 0,
     this.avgConsumptionLPer100Km = 0,
     this.dataFilePath,
+    this.inProgress = false,
   });
 
   final String id;
@@ -22,6 +23,10 @@ class Trip {
   final double distanceKm;
   final double avgConsumptionLPer100Km;
   final String? dataFilePath;
+
+  /// True for the provisional record saved while a trip is recording. One
+  /// still set at launch means the app died before STOP.
+  final bool inProgress;
 
   double get totalFuelLiters => totalFuelMl / 1000;
 
@@ -37,6 +42,7 @@ class Trip {
       'distanceKm': distanceKm,
       'avgConsumptionLPer100Km': avgConsumptionLPer100Km,
       'dataFilePath': dataFilePath,
+      'inProgress': inProgress,
     };
   }
 
@@ -55,6 +61,7 @@ class Trip {
       avgConsumptionLPer100Km:
           (map['avgConsumptionLPer100Km'] as num?)?.toDouble() ?? 0,
       dataFilePath: map['dataFilePath'] as String?,
+      inProgress: map['inProgress'] as bool? ?? false,
     );
   }
 }

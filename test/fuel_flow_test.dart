@@ -427,4 +427,108 @@ void main() {
       expect(await service.requestSingleFrame(), isNull);
     });
   });
+
+  group('fuel type constants', () {
+
+    test('diesel uses AFR 14.5 and 832 g/L', () {
+      // fuel = 14.5 / 14.5 = 1 g/s; mL/s = 1 / 832 * 1000
+      final value = service.fuelFlow(
+        2000,
+        100,
+        300,
+        volumetricEfficiency: 85,
+        engineDisplacementLiters: 2.0,
+        fuelType: 'Diesel',
+        mafGramsPerSec: 14.5,
+      );
+      expect(value, closeTo(1000 / 832, 1e-9));
+    });
+
+    test('lean diesel lambda reduces fuel proportionally', () {
+      double flow(double lambda) => service.fuelFlow(
+            1500,
+            100,
+            300,
+            volumetricEfficiency: 85,
+            engineDisplacementLiters: 2.0,
+            fuelType: 'Diesel',
+            equivRatio: lambda,
+            mafGramsPerSec: 20,
+          );
+      expect(flow(3.0), closeTo(flow(1.0) / 3, 1e-12));
+    });
+  });
+
+  group('overrun fuel cut-off detection', () {
+    bool cut({
+      double rpm = 2000,
+      double speedKph = 60,
+      bool isDiesel = false,
+      double? throttle,
+      double? closedThrottle,
+      double? mapKpa,
+      double? lambda,
+    }) =>
+        ObdService.isOverrunFuelCut(
+          rpm: rpm,
+          speedKph: speedKph,
+          isDiesel: isDiesel,
+          throttlePercent: throttle,
+          closedThrottlePercent: closedThrottle,
+          mapKpa: mapKpa,
+          lambda: lambda,
+        );
+
+    test('closed throttle while moving above idle is a cut', () {
+      expect(cut(throttle: 12.5, closedThrottle: 12.2), isTrue);
+    });
+
+    test('an open throttle is not a cut', () {
+      expect(cut(throttle: 20, closedThrottle: 12.2), isFalse);
+    });
+
+    test('idle speed keeps fuelling', () {
+      expect(cut(rpm: 900, throttle: 12.2, closedThrottle: 12.2), isFalse);
+    });
+
+    test('standing still is not a cut', () {
+      expect(cut(speedKph: 0, throttle: 12.2, closedThrottle: 12.2), isFalse);
+    });
+
+    test('deep manifold vacuum above idle is a cut on petrol only', () {
+      expect(cut(mapKpa: 25), isTrue);
+      expect(cut(mapKpa: 45), isFalse);
+      expect(cut(mapKpa: 25, isDiesel: true), isFalse);
+    });
+
+    test('without throttle or MAP nothing is assumed', () {
+      expect(cut(), isFalse);
+    });
+
+    test('a commanded lambda of 0 is the ECU reporting the cut', () {
+      expect(cut(rpm: 900, speedKph: 0, lambda: 0), isTrue);
+      expect(cut(rpm: 0, lambda: 0), isFalse);
+    });
+  });
+  group('fuel trims', () {
+    test('STFT + LTFT scale fuel mass by (1 + sum/100)', () {
+      final value = service.fuelFlow(
+        2000,
+        100,
+        300,
+        volumetricEfficiency: 85,
+        engineDisplacementLiters: 2.0,
+        mafGramsPerSec: 14.7,
+        stftPercent: 2,
+        ltftPercent: 6,
+      );
+      expect(value, closeTo(1.3422818791946307 * 1.08, 1e-9));
+    });
+
+    test('combined trim is clamped and non-finite trims ignored', () {
+      expect(ObdService.fuelTrimFactor(80, 40), 1.5);
+      expect(ObdService.fuelTrimFactor(-100, 0), 0.5);
+      expect(ObdService.fuelTrimFactor(double.nan, 5), closeTo(1.05, 1e-12));
+    });
+  });
 }

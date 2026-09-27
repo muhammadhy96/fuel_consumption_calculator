@@ -20,6 +20,17 @@ class CarProfile {
   final String? notes;
   final DateTime createdAt;
 
+  /// Used by the speed-density estimate when a profile has no displacement.
+  static const double assumedDisplacementLiters = 2.0;
+
+  double get effectiveDisplacementLiters =>
+      engineDisplacement ?? assumedDisplacementLiters;
+
+  /// e.g. `1.6L`, or `2.0L assumed` when the profile has none.
+  String get displacementLabel => engineDisplacement != null
+      ? '${engineDisplacement!.toStringAsFixed(1)}L'
+      : '${assumedDisplacementLiters.toStringAsFixed(1)}L assumed';
+
   CarProfile copyWith({
     String? name,
     String? fuelType,

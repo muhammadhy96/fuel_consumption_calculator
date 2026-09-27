@@ -40,20 +40,35 @@ class PidSupport {
     }
   }
 
-  /// Parses a raw hex payload (e.g. `41 00 BE 3E B8 13`) from the ELM327. The
-  /// first two bytes are the mode echo (41) and the PID echo (00/20/40); the
-  /// remaining 4 bytes are the bitmask.
+  /// Parses a raw hex payload (e.g. `41 00 BE 3E B8 13`) from the ELM327. Each
+  /// block is the mode echo (41), the PID echo (00/20/40) and a 4-byte
+  /// bitmask. With headers off, every ECU that answers (engine, gearbox, ...)
+  /// appends its own block in no guaranteed order, so all of them are merged.
   void parseRawResponse(String raw) {
-    final cleaned = raw.replaceAll(_nonHex, '');
+    // Status words such as `BUS INIT: ...OK` or `SEARCHING...` contain hex
+    // letters (B, C, E) that would shift the byte alignment.
+    final cleaned =
+        raw.replaceAll(_statusWord, '').replaceAll(_nonHex, '');
     final bytes = <int>[];
     for (var i = 0; i + 1 < cleaned.length; i += 2) {
       final v = int.tryParse(cleaned.substring(i, i + 2), radix: 16);
       if (v != null) bytes.add(v);
     }
-    if (bytes.length < 6 || bytes[0] != 0x41) return;
-    final rangePid = bytes[1];
-    parseRange(rangePid, bytes.sublist(2, 6));
+    var i = 0;
+    while (i + 6 <= bytes.length) {
+      final rangePid = bytes[i + 1];
+      if (bytes[i] == 0x41 &&
+          (rangePid == 0x00 || rangePid == 0x20 || rangePid == 0x40)) {
+        parseRange(rangePid, bytes.sublist(i + 2, i + 6));
+        i += 6;
+      } else {
+        i += 1;
+      }
+    }
   }
+
+  /// A run of letters containing at least one non-hex letter.
+  static final RegExp _statusWord = RegExp(r'[A-Za-z]*[G-Zg-z][A-Za-z]*');
 
   /// Filters a list of canonical PID keys to only those the ECU supports.
   /// If no bitmask has been parsed yet, returns the original list (best-effort).

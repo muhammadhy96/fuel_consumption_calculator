@@ -6,6 +6,7 @@ import '../../models/car_profile.dart';
 import '../../models/trip.dart';
 import '../../models/trip_sample.dart';
 import 'trip_chart.dart';
+import 'trip_export_actions.dart';
 
 class TripSummaryPage extends StatelessWidget {
   const TripSummaryPage({
@@ -22,7 +23,12 @@ class TripSummaryPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Trip Summary')),
+      appBar: AppBar(
+        title: const Text('Trip Summary'),
+        actions: [
+          TripExportActions(trip: trip, profileName: profile.name),
+        ],
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(

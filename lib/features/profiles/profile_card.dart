@@ -19,12 +19,27 @@ class ProfileCard extends StatelessWidget {
     final trips = context.watch<TripProvider>();
     final selected = profiles.selectedProfile?.id == profile.id;
     final tripCount = trips.tripsForProfile(profile.id).length;
-    final subtitle =
-        '${profile.fuelType} · ${profile.engineDisplacement != null ? '${profile.engineDisplacement!.toStringAsFixed(1)}L' : 'displacement N/A'}';
+    final subtitle = '${profile.fuelType} · ${profile.displacementLabel}';
+
+    // A running trip is computed and saved for the car it started with, so
+    // that car cannot be switched away from, edited or deleted until STOP.
+    final recordingId = trips.activeProfileId;
+    final isRecording = recordingId == profile.id;
+    void showBlocked(String message) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message)),
+      );
+    }
 
     return InkWell(
       borderRadius: BorderRadius.circular(20),
-      onTap: () => profiles.selectProfile(profile),
+      onTap: () {
+        if (recordingId != null && !isRecording) {
+          showBlocked('Stop the current trip before switching cars.');
+          return;
+        }
+        profiles.selectProfile(profile);
+      },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 220),
         padding: const EdgeInsets.all(16),
@@ -109,6 +124,12 @@ class ProfileCard extends StatelessWidget {
                 side: const BorderSide(color: AppTheme.surfaceDarkOutline),
               ),
               onSelected: (value) async {
+                if (isRecording) {
+                  showBlocked(
+                    'Stop the current trip before changing this profile.',
+                  );
+                  return;
+                }
                 if (value == 'edit') {
                   onEdit();
                 } else if (value == 'delete') {

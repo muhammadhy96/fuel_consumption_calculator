@@ -16,6 +16,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:fuel_consumption_calculator/core/services/file_service.dart';
 import 'package:fuel_consumption_calculator/core/services/storage_service.dart';
+import 'package:fuel_consumption_calculator/core/utils/trip_integrator.dart';
 import 'package:fuel_consumption_calculator/models/car_profile.dart';
 import 'package:fuel_consumption_calculator/models/trip.dart';
 import 'package:fuel_consumption_calculator/models/trip_sample.dart';
@@ -33,6 +34,11 @@ class FakeFileService extends FileService {
   List<TripSample> lastBulkSamples = const [];
   bool bulkSaveThrows = false;
   String bulkSavePath = '/exports/FuelTrips/fake_trip.csv';
+  final Map<String, List<TripSample>> csvByPath = {};
+
+  @override
+  Future<List<TripSample>> loadTripSamples(String path) async =>
+      csvByPath[path] ?? const [];
 
   @override
   Future<TripCsvWriter?> openTripWriter(String profileId) async {
@@ -64,7 +70,10 @@ class FakeStorageService extends StorageService {
   @override
   Future<void> saveTrip(Trip trip) async {
     if (saveThrows) throw StateError('box is closed');
-    trips.add(trip);
+    // Hive boxes are keyed by trip id, so a save replaces the earlier record.
+    trips
+      ..removeWhere((existing) => existing.id == trip.id)
+      ..add(trip);
   }
 
   @override
@@ -205,13 +214,13 @@ void main() {
 
     test('a stationary trip burns fuel but covers no distance', () async {
       provider.startTrip(buildProfile());
-      provider
-        ..addSample(sample(0, fuelMlPerSec: 0.5, speedKph: 0))
-        ..addSample(sample(60, fuelMlPerSec: 0.5, speedKph: 0));
+      for (var t = 0; t <= 60; t += 5) {
+        provider.addSample(sample(t.toDouble(), fuelMlPerSec: 0.5));
+      }
 
       final trip = await provider.stopTrip();
 
-      // idle: (0.5+0.5)/2*60 = 30 mL
+      // idle: 0.5 mL/s * 60 s = 30 mL
       expect(trip!.totalFuelMl, closeTo(30.0, 1e-12));
       expect(trip.distanceKm, 0);
       // distance == 0 must not produce Infinity or NaN
@@ -457,6 +466,131 @@ void main() {
         () => provider.samples.add(sample(1)),
         throwsUnsupportedError,
       );
+    });
+  });
+
+  group('gaps between samples', () {
+    test('a gap longer than the limit is skipped, not interpolated', () async {
+      provider.startTrip(buildProfile());
+      provider
+        ..addSample(sample(0, fuelMlPerSec: 1, speedKph: 36))
+        ..addSample(sample(1, fuelMlPerSec: 1, speedKph: 36))
+        // Link lost for 30 s.
+        ..addSample(sample(31, fuelMlPerSec: 1, speedKph: 36))
+        ..addSample(sample(32, fuelMlPerSec: 1, speedKph: 36));
+
+      final trip = await provider.stopTrip();
+
+      // Only the two 1 s segments count: 2 mL and 2 * 0.01 km.
+      expect(trip!.totalFuelMl, closeTo(2.0, 1e-12));
+      expect(trip.distanceKm, closeTo(0.02, 1e-12));
+    });
+
+    test('a gap up to the limit is still interpolated', () async {
+      provider.startTrip(buildProfile());
+      provider
+        ..addSample(sample(0, fuelMlPerSec: 2, speedKph: 72))
+        ..addSample(sample(TripIntegrator.maxGapSeconds,
+            fuelMlPerSec: 2, speedKph: 72));
+
+      final trip = await provider.stopTrip();
+
+      expect(trip!.totalFuelMl, closeTo(2 * TripIntegrator.maxGapSeconds, 1e-9));
+    });
+
+    test('the running totals equal what stopTrip saves', () async {
+      provider.startTrip(buildProfile());
+      provider
+        ..addSample(sample(0, fuelMlPerSec: 1, speedKph: 50))
+        ..addSample(sample(2, fuelMlPerSec: 3, speedKph: 70))
+        ..addSample(sample(20, fuelMlPerSec: 3, speedKph: 70))
+        ..addSample(sample(21, fuelMlPerSec: 2, speedKph: 60));
+      final liveFuel = provider.totalFuelMl;
+      final liveDistance = provider.distanceKm;
+
+      final trip = await provider.stopTrip();
+
+      expect(trip!.totalFuelMl, liveFuel);
+      expect(trip.distanceKm, liveDistance);
+    });
+  });
+
+  group('interrupted trips', () {
+    test('a provisional record is saved at start and replaced at stop',
+        () async {
+      provider.startTrip(buildProfile());
+      await Future<void>.delayed(Duration.zero);
+      expect(storage.trips.single.inProgress, isTrue);
+      expect(storage.trips.single.profileId, 'profile-1');
+
+      provider
+        ..addSample(sample(0, fuelMlPerSec: 1))
+        ..addSample(sample(4, fuelMlPerSec: 3));
+      final trip = await provider.stopTrip();
+
+      expect(storage.trips.single.id, trip!.id);
+      expect(storage.trips.single.inProgress, isFalse);
+      expect(storage.trips.single.totalFuelMl, closeTo(8.0, 1e-12));
+    });
+
+    test('a trip left in progress is rebuilt from its CSV on load', () async {
+      const path = '/exports/FuelTrips/interrupted.csv';
+      files.csvByPath[path] = [
+        sample(0, fuelMlPerSec: 1, speedKph: 36),
+        sample(2, fuelMlPerSec: 3, speedKph: 36),
+        sample(4.4, fuelMlPerSec: 3, speedKph: 36),
+      ];
+      final start = DateTime(2026, 9, 24, 10);
+      storage.trips.add(Trip(
+        id: 'trip-interrupted',
+        profileId: 'profile-1',
+        startTime: start,
+        endTime: start,
+        durationSeconds: 0,
+        totalFuelMl: 0,
+        avgFuelMlPerSec: 0,
+        dataFilePath: path,
+        inProgress: true,
+      ));
+
+      await provider.loadTrips();
+
+      final trip = provider.tripsForProfile('profile-1').single;
+      expect(trip.inProgress, isFalse);
+      // (1+3)/2*2 + (3+3)/2*2.4 = 4 + 7.2 = 11.2 mL
+      expect(trip.totalFuelMl, closeTo(11.2, 1e-9));
+      expect(trip.distanceKm, closeTo(0.044, 1e-9));
+      expect(trip.durationSeconds, 4);
+      expect(trip.endTime, start.add(const Duration(seconds: 4)));
+      expect(storage.trips.single.inProgress, isFalse);
+    });
+
+    test('an interrupted trip that recorded nothing is dropped', () async {
+      final start = DateTime(2026, 9, 24, 10);
+      storage.trips.add(Trip(
+        id: 'trip-empty',
+        profileId: 'profile-1',
+        startTime: start,
+        endTime: start,
+        durationSeconds: 0,
+        totalFuelMl: 0,
+        avgFuelMlPerSec: 0,
+        inProgress: true,
+      ));
+
+      await provider.loadTrips();
+
+      expect(provider.tripsForProfile('profile-1'), isEmpty);
+      expect(storage.trips, isEmpty);
+    });
+
+    test('activeProfileId names the recording profile only while running',
+        () async {
+      expect(provider.activeProfileId, isNull);
+      provider.startTrip(buildProfile(id: 'profile-7'));
+      expect(provider.activeProfileId, 'profile-7');
+      await provider.stopTrip();
+      expect(provider.activeProfileId, isNull);
     });
   });
 }

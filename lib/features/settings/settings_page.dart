@@ -131,7 +131,7 @@ class _ObdDiagnostics extends StatelessWidget {
         const SizedBox(height: 8),
         _DiagRow(
           label: 'Direct fuel rate',
-          value: (obd.fuelRateMlPerSecDirect ?? 0) > 0
+          value: obd.directFuelRateActive
               ? 'Supported (PID 015E)'
               : 'Not available',
         ),

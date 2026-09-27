@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/theme/app_theme.dart';
@@ -39,7 +40,43 @@ class _ProfileFormSheet extends StatefulWidget {
 }
 
 class _ProfileFormSheetState extends State<_ProfileFormSheet> {
-  static const List<String> _fuelTypes = ['Petrol', 'Diesel', 'LPG', 'E85'];
+  static const List<String> _fuelTypes = ['Petrol', 'Diesel'];
+
+  static final List<TextInputFormatter> _decimalInput = [
+    FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
+  ];
+
+  /// Accepts `1.6` and `1,6` (comma-decimal keyboards). Null when the text is
+  /// empty or not a finite number.
+  static double? _parseNumber(String? text) {
+    final normalized = (text ?? '').trim().replaceAll(',', '.');
+    if (normalized.isEmpty) return null;
+    final value = double.tryParse(normalized);
+    return value != null && value.isFinite ? value : null;
+  }
+
+  static String? _validateDisplacement(String? text) {
+    if ((text ?? '').trim().isEmpty) return 'Displacement required';
+    final value = _parseNumber(text);
+    if (value == null) return 'Enter a number, e.g. 1.6';
+    if (value > 100) return 'Enter litres, not cc (e.g. 1.6)';
+    if (value < 0.5 || value > 10) return 'Between 0.5 and 10 L';
+    return null;
+  }
+
+  static String? _validateVe(String? text) {
+    final value = _parseNumber(text);
+    if (value == null) return 'Enter a percentage, e.g. 85';
+    if (value < 30 || value > 120) return 'Between 30 and 120 %';
+    return null;
+  }
+
+  static String? _validatePrice(String? text) {
+    if ((text ?? '').trim().isEmpty) return null;
+    final value = _parseNumber(text);
+    if (value == null || value < 0) return 'Enter a price, e.g. 1.85';
+    return null;
+  }
 
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
 
@@ -67,7 +104,10 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
           ? profile!.fuelPricePerLiter.toString()
           : '',
     );
-    _fuelType = profile?.fuelType ?? _fuelTypes.first;
+    final savedFuelType = profile?.fuelType;
+    _fuelType = _fuelTypes.contains(savedFuelType)
+        ? savedFuelType!
+        : _fuelTypes.first;
   }
 
   @override
@@ -83,9 +123,10 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
 
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
-    final displacement = double.tryParse(_displacementCtrl.text);
-    final ve = double.tryParse(_veCtrl.text) ?? 85;
-    final price = double.tryParse(_priceCtrl.text) ?? 0;
+    // All three passed validation, so they parse.
+    final displacement = _parseNumber(_displacementCtrl.text)!;
+    final ve = _parseNumber(_veCtrl.text)!;
+    final price = _parseNumber(_priceCtrl.text) ?? 0;
     final notes =
         _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim();
     // Resolved before the await so no BuildContext is used across the gap.
@@ -158,7 +199,7 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
                   prefixIcon: Icon(Icons.directions_car),
                 ),
                 validator: (v) =>
-                    v == null || v.isEmpty ? 'Name required' : null,
+                    v == null || v.trim().isEmpty ? 'Name required' : null,
                 style: const TextStyle(color: Colors.white),
               ),
               const SizedBox(height: 14),
@@ -189,6 +230,8 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
                       ),
                       keyboardType:
                           const TextInputType.numberWithOptions(decimal: true),
+                      inputFormatters: _decimalInput,
+                      validator: _validateDisplacement,
                       style: const TextStyle(color: Colors.white),
                     ),
                   ),
@@ -202,6 +245,8 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
                       ),
                       keyboardType:
                           const TextInputType.numberWithOptions(decimal: true),
+                      inputFormatters: _decimalInput,
+                      validator: _validateVe,
                       style: const TextStyle(color: Colors.white),
                     ),
                   ),
@@ -216,6 +261,8 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
                 ),
                 keyboardType:
                     const TextInputType.numberWithOptions(decimal: true),
+                inputFormatters: _decimalInput,
+                validator: _validatePrice,
                 style: const TextStyle(color: Colors.white),
               ),
               const SizedBox(height: 14),

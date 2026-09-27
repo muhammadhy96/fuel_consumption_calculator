@@ -15,6 +15,12 @@ subprojects {
     val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
     project.layout.buildDirectory.value(newSubprojectBuildDir)
 }
+// Old plugins (e.g. flutter_bluetooth_serial) pin compileSdk 30, which breaks release resource linking (android:attr/lStar).
+subprojects {
+    afterEvaluate {
+        extensions.findByType(com.android.build.gradle.LibraryExtension::class.java)?.compileSdk = 36
+    }
+}
 subprojects {
     project.evaluationDependsOn(":app")
 }

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../core/services/file_service.dart';
 import '../core/services/storage_service.dart';
+import '../core/utils/trip_integrator.dart';
 import '../models/car_profile.dart';
 import '../models/trip.dart';
 import '../models/trip_sample.dart';
@@ -22,17 +23,22 @@ class TripProvider extends ChangeNotifier {
   /// shift amortised O(1) per sample instead of O(n) on every append.
   static const int _evictionBatch = 1000;
 
+  /// How often the provisional trip record is refreshed while recording.
+  static const int _provisionalSaveIntervalSeconds = 30;
+
   final FileService _fileService;
   final StorageService _storage;
 
   final Map<String, List<Trip>> _tripsByProfile = {};
   final List<TripSample> _samples = [];
+  final TripIntegrator _totals = TripIntegrator();
 
   CarProfile? _activeProfile;
   bool _running = false;
   int _elapsedSeconds = 0;
   Timer? _timer;
   DateTime? _startTime;
+  String? _tripId;
   Trip? _lastTrip;
 
   TripCsvWriter? _csvWriter;
@@ -46,15 +52,18 @@ class TripProvider extends ChangeNotifier {
   /// the trip (so it stays comparable across evictions).
   int _writtenSamples = 0;
 
-  /// Fuel / distance already integrated out of the evicted samples, so the trip
-  /// summary stays exact even when the in-memory buffer has been trimmed.
-  double _carriedFuelMl = 0;
-  double _carriedDistanceKm = 0;
-
   bool get running => _running;
   int get elapsedSeconds => _elapsedSeconds;
   Trip? get lastTrip => _lastTrip;
   List<TripSample> get samples => List.unmodifiable(_samples);
+
+  /// Profile the running trip is recorded against, or null when idle.
+  String? get activeProfileId => _running ? _activeProfile?.id : null;
+
+  /// Running totals of the current trip. These are the exact numbers
+  /// [stopTrip] saves, so the live dashboard reads them too.
+  double get totalFuelMl => _totals.fuelMl;
+  double get distanceKm => _totals.distanceKm;
 
   /// Path of the CSV currently being streamed, or null when no trip is running
   /// or the streaming writer could not be opened.
@@ -70,10 +79,18 @@ class TripProvider extends ChangeNotifier {
 
   Future<void> loadTrips() async {
     final stored = await _storage.loadTrips();
-    _tripsByProfile
-      .clear();
-    final allTrips = <Trip>[];
+    final trips = <Trip>[];
     for (final trip in stored) {
+      if (!trip.inProgress) {
+        trips.add(trip);
+      } else if (!(_running && trip.id == _tripId)) {
+        final recovered = await _recoverTrip(trip);
+        if (recovered != null) trips.add(recovered);
+      }
+    }
+    _tripsByProfile.clear();
+    final allTrips = <Trip>[];
+    for (final trip in trips) {
       final list = _tripsByProfile.putIfAbsent(trip.profileId, () => []);
       list.add(trip);
       allTrips.add(trip);
@@ -93,21 +110,28 @@ class TripProvider extends ChangeNotifier {
     _elapsedSeconds = 0;
     _samples.clear();
     _resetSampleAccounting();
-    _startTime = DateTime.now();
+    final start = DateTime.now();
+    _startTime = start;
+    _tripId = 'trip-${start.millisecondsSinceEpoch}';
     _timer?.cancel();
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       _elapsedSeconds += 1;
+      if (_elapsedSeconds % _provisionalSaveIntervalSeconds == 0) {
+        _saveProvisional();
+      }
       notifyListeners();
     });
     // Fire-and-forget: samples recorded before the file is open are buffered in
     // [_samples] and flushed as soon as the writer resolves.
     _writerFuture = _openWriter(profile.id, _tripToken);
+    _saveProvisional();
     notifyListeners();
   }
 
   void addSample(TripSample sample) {
     if (!_running) return;
     _samples.add(sample);
+    _totals.add(sample);
     final writer = _csvWriter;
     if (writer != null) {
       writer.addSample(sample);
@@ -124,28 +148,21 @@ class TripProvider extends ChangeNotifier {
 
     final profileId = _activeProfile!.id;
     final endTime = DateTime.now();
-    final duration =
-        _samples.isNotEmpty ? _samples.last.timeSeconds.round() : _elapsedSeconds;
-    final totalFuel = _integrateFuelMl() + _carriedFuelMl;
-    final avgFuel = duration > 0 ? totalFuel / duration : 0.0;
-    final distanceKm = _calculateDistanceKm() + _carriedDistanceKm;
-    final avgConsumption =
-        distanceKm > 0 ? (totalFuel / 1000) / distanceKm * 100 : 0.0;
+    final duration = _currentDurationSeconds();
 
     // Resolve the CSV path before [_samples] is cleared, so the bulk fallback
     // still has the data if the streaming writer failed.
     final csvPath = await _finalizeCsv(profileId);
 
-    final trip = Trip(
-      id: 'trip-${DateTime.now().millisecondsSinceEpoch}',
+    // Same id as the provisional record, so saving replaces it.
+    final trip = _buildTrip(
+      id: _tripId ?? 'trip-${endTime.millisecondsSinceEpoch}',
       profileId: profileId,
       startTime: _startTime ?? endTime,
       endTime: endTime,
       durationSeconds: duration,
-      totalFuelMl: totalFuel,
-      avgFuelMlPerSec: avgFuel,
-      distanceKm: distanceKm,
-      avgConsumptionLPer100Km: avgConsumption,
+      fuelMl: _totals.fuelMl,
+      distanceKm: _totals.distanceKm,
       dataFilePath: csvPath,
     );
 
@@ -159,6 +176,7 @@ class TripProvider extends ChangeNotifier {
     }
 
     _activeProfile = null;
+    _tripId = null;
     _elapsedSeconds = 0;
     _samples.clear();
     _resetSampleAccounting();
@@ -178,6 +196,31 @@ class TripProvider extends ChangeNotifier {
 
   Future<List<TripSample>> loadSamples(String path) {
     return _fileService.loadTripSamples(path);
+  }
+
+  /// Hands this trip's CSV to the system share sheet.
+  ///
+  /// [profileName] only shapes the exported filename; the data is whatever was
+  /// streamed to disk while the trip ran.
+  Future<TripExportResult> shareTrip(
+    Trip trip,
+    String profileName, {
+    Rect? sharePositionOrigin,
+  }) {
+    return _fileService.shareTripCsv(
+      trip.dataFilePath,
+      exportName: FileService.exportFileName(profileName, trip.startTime),
+      subject: '$profileName trip — ${trip.startTime.toLocal()}',
+      sharePositionOrigin: sharePositionOrigin,
+    );
+  }
+
+  /// Saves a copy of this trip's CSV wherever the driver picks.
+  Future<TripExportResult> saveTripCopy(Trip trip, String profileName) {
+    return _fileService.saveTripCsvCopy(
+      trip.dataFilePath,
+      exportName: FileService.exportFileName(profileName, trip.startTime),
+    );
   }
 
   @override
@@ -208,7 +251,120 @@ class TripProvider extends ChangeNotifier {
     }
     _csvWriter = writer;
     _flushWriterBacklog();
+    _saveProvisional();
     return writer;
+  }
+
+  int _currentDurationSeconds() =>
+      _samples.isNotEmpty ? _samples.last.timeSeconds.round() : _elapsedSeconds;
+
+  static Trip _buildTrip({
+    required String id,
+    required String profileId,
+    required DateTime startTime,
+    required DateTime endTime,
+    required int durationSeconds,
+    required double fuelMl,
+    required double distanceKm,
+    String? dataFilePath,
+    bool inProgress = false,
+  }) {
+    return Trip(
+      id: id,
+      profileId: profileId,
+      startTime: startTime,
+      endTime: endTime,
+      durationSeconds: durationSeconds,
+      totalFuelMl: fuelMl,
+      avgFuelMlPerSec: durationSeconds > 0 ? fuelMl / durationSeconds : 0.0,
+      distanceKm: distanceKm,
+      avgConsumptionLPer100Km:
+          distanceKm > 0 ? (fuelMl / 1000) / distanceKm * 100 : 0.0,
+      dataFilePath: dataFilePath,
+      inProgress: inProgress,
+    );
+  }
+
+  /// Keeps a provisional record in storage while recording, so a trip whose
+  /// app is killed before STOP can be recovered on the next launch.
+  void _saveProvisional() {
+    final profile = _activeProfile;
+    final id = _tripId;
+    final start = _startTime;
+    if (!_running || profile == null || id == null || start == null) return;
+    final duration = _currentDurationSeconds();
+    unawaited(_persistQuietly(_buildTrip(
+      id: id,
+      profileId: profile.id,
+      startTime: start,
+      endTime: start.add(Duration(seconds: duration)),
+      durationSeconds: duration,
+      fuelMl: _totals.fuelMl,
+      distanceKm: _totals.distanceKm,
+      dataFilePath: _csvWriter?.path,
+      inProgress: true,
+    )));
+  }
+
+  Future<void> _persistQuietly(Trip trip) async {
+    try {
+      await _storage.saveTrip(trip);
+    } catch (err) {
+      debugPrint('Failed to save provisional trip: $err');
+    }
+  }
+
+  /// Finalises a trip the app never got to stop, from whatever reached its
+  /// CSV. Returns null (and drops the record) when nothing was recorded.
+  Future<Trip?> _recoverTrip(Trip provisional) async {
+    final path = provisional.dataFilePath;
+    var samples = const <TripSample>[];
+    if (path != null) {
+      try {
+        samples = await _fileService.loadTripSamples(path);
+      } catch (err) {
+        debugPrint('Failed to read CSV of interrupted trip: $err');
+      }
+    }
+    final Trip recovered;
+    if (samples.isNotEmpty) {
+      final totals = TripIntegrator()..addAll(samples);
+      final duration = samples.last.timeSeconds.round();
+      recovered = _buildTrip(
+        id: provisional.id,
+        profileId: provisional.profileId,
+        startTime: provisional.startTime,
+        endTime: provisional.startTime.add(Duration(seconds: duration)),
+        durationSeconds: duration,
+        fuelMl: totals.fuelMl,
+        distanceKm: totals.distanceKm,
+        dataFilePath: path,
+      );
+    } else if (provisional.totalFuelMl > 0 || provisional.distanceKm > 0) {
+      recovered = _buildTrip(
+        id: provisional.id,
+        profileId: provisional.profileId,
+        startTime: provisional.startTime,
+        endTime: provisional.endTime,
+        durationSeconds: provisional.durationSeconds,
+        fuelMl: provisional.totalFuelMl,
+        distanceKm: provisional.distanceKm,
+        dataFilePath: path,
+      );
+    } else {
+      try {
+        await _storage.deleteTrip(provisional.id);
+      } catch (err) {
+        debugPrint('Failed to drop empty interrupted trip: $err');
+      }
+      return null;
+    }
+    try {
+      await _storage.saveTrip(recovered);
+    } catch (err) {
+      debugPrint('Failed to save recovered trip: $err');
+    }
+    return recovered;
   }
 
   /// Writes every buffered sample the writer has not seen yet.
@@ -223,24 +379,11 @@ class TripProvider extends ChangeNotifier {
     _writtenSamples = _droppedSamples + _samples.length;
   }
 
-  /// Trims the oldest samples once the in-memory cap is exceeded.
-  ///
-  /// The dropped segment is folded into [_carriedFuelMl] / [_carriedDistanceKm]
-  /// first — including the trapezoid straddling the eviction boundary — so the
-  /// trip totals match a full-buffer integration exactly.
+  /// Trims the oldest samples once the in-memory cap is exceeded. Totals are
+  /// accumulated as samples arrive, so eviction cannot change them.
   void _evictOldSamplesIfNeeded() {
     if (_samples.length < maxInMemorySamples + _evictionBatch) return;
     final removeCount = _samples.length - maxInMemorySamples;
-    for (var i = 1; i <= removeCount; i++) {
-      final prev = _samples[i - 1];
-      final curr = _samples[i];
-      final dt = curr.timeSeconds - prev.timeSeconds;
-      if (dt > 0) {
-        _carriedFuelMl += ((prev.fuelMlPerSec + curr.fuelMlPerSec) / 2) * dt;
-        _carriedDistanceKm +=
-            (((prev.speedKph + curr.speedKph) / 2) * dt) / 3600;
-      }
-    }
     _samples.removeRange(0, removeCount);
     _droppedSamples += removeCount;
   }
@@ -278,8 +421,7 @@ class TripProvider extends ChangeNotifier {
   void _resetSampleAccounting() {
     _droppedSamples = 0;
     _writtenSamples = 0;
-    _carriedFuelMl = 0;
-    _carriedDistanceKm = 0;
+    _totals.reset();
     _discardWriter();
   }
 
@@ -293,35 +435,5 @@ class TripProvider extends ChangeNotifier {
     if (writer != null) {
       unawaited(writer.close());
     }
-  }
-
-  double _calculateDistanceKm() {
-    if (_samples.length < 2) return 0;
-    double distance = 0;
-    for (var i = 1; i < _samples.length; i++) {
-      final prev = _samples[i - 1];
-      final curr = _samples[i];
-      final dt = curr.timeSeconds - prev.timeSeconds;
-      if (dt > 0) {
-        final avgSpeed = (prev.speedKph + curr.speedKph) / 2;
-        distance += (avgSpeed * dt) / 3600;
-      }
-    }
-    return distance;
-  }
-
-  double _integrateFuelMl() {
-    if (_samples.length < 2) return 0;
-    double total = 0;
-    for (var i = 1; i < _samples.length; i++) {
-      final prev = _samples[i - 1];
-      final curr = _samples[i];
-      final dt = curr.timeSeconds - prev.timeSeconds;
-      if (dt > 0) {
-        final avgRate = (prev.fuelMlPerSec + curr.fuelMlPerSec) / 2;
-        total += avgRate * dt;
-      }
-    }
-    return total;
   }
 }

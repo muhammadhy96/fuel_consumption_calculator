@@ -129,8 +129,7 @@ class _ProfileHeader extends StatelessWidget {
                 ),
                 const SizedBox(height: 3),
                 Text(
-                  '${profile.fuelType} · '
-                  '${profile.engineDisplacement != null ? '${profile.engineDisplacement!.toStringAsFixed(1)}L' : 'engine TBD'}',
+                  '${profile.fuelType} · ${profile.displacementLabel}',
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.65),
                     fontSize: 13,
@@ -308,10 +307,16 @@ class _FuelFlowHero extends StatelessWidget {
   Widget build(BuildContext context) {
     final lph = fuelFlow * 3.6;
     final calcMethod = context.select<ObdProvider, String>((obd) {
-      if ((obd.fuelRateMlPerSecDirect ?? 0) > 0) return 'PID 015E';
-      if (obd.mafGramsPerSec > 0) return 'MAF Sensor';
-      if (obd.mapKpa > 0) return 'Speed-Density';
-      return 'Estimating';
+      switch (obd.fuelSource) {
+        case FuelSource.direct:
+          return 'PID 015E';
+        case FuelSource.maf:
+          return 'MAF Sensor';
+        case FuelSource.speedDensity:
+          return 'Speed-Density';
+        case FuelSource.none:
+          return 'Estimating';
+      }
     });
     final isDirect = calcMethod == 'PID 015E';
     return Container(

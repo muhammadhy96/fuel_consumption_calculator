@@ -8,6 +8,7 @@ import 'package:provider/provider.dart';
 
 import '../../core/services/trip_foreground_service.dart';
 import '../../core/theme/app_theme.dart';
+import '../../features/drive/confirm_profile_sheet.dart';
 import '../../features/drive/connect_button.dart';
 import '../../features/drive/fuel_chart_card.dart';
 import '../../features/drive/live_dashboard.dart';
@@ -67,11 +68,6 @@ class _DrivePageState extends State<DrivePage> {
   /// would strand every cleanup line after it.
   ObdProvider? _obdRef;
 
-  double _totalFuelMl = 0;
-  double _distanceKm = 0;
-  double? _previousTime;
-  double _previousFuel = 0;
-  double _previousSpeed = 0;
   final List<double> _recentFuel = [];
   final List<double> _recentSpeed = [];
   static const int _instantWindow = 20;
@@ -111,34 +107,61 @@ class _DrivePageState extends State<DrivePage> {
     );
   }
 
+  /// Requests every permission one at a time, before the Bluetooth plugin is
+  /// called: the plugin makes its own location request, and two requests in
+  /// flight at once make Android drop one of them.
   Future<bool> _requestPermissions() async {
     final scan = await Permission.bluetoothScan.request();
     final connect = await Permission.bluetoothConnect.request();
-    // We no longer run a discovery scan, so location is not required on any
-    // API level for this flow. Ask for it (and for notifications, needed by
-    // the foreground-service notification on API 33+) without blocking.
-    unawaited(_requestOptionalPermissions());
-    final granted = scan.isGranted && connect.isGranted;
-    if (!granted && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Bluetooth permissions are required.'),
-        ),
+    if (!scan.isGranted || !connect.isGranted) {
+      _showPermissionProblem(
+        'Bluetooth permission is needed to talk to the OBD adapter.',
+        permanentlyDenied:
+            scan.isPermanentlyDenied || connect.isPermanentlyDenied,
       );
+      return false;
     }
-    return granted;
-  }
-
-  /// Best-effort permissions. Their outcome never gates connecting.
-  Future<void> _requestOptionalPermissions() async {
+    // The Bluetooth plugin refuses to list paired devices without location
+    // access on every Android version, even though it never scans.
+    final location = await Permission.location.request();
+    if (!location.isGranted) {
+      _showPermissionProblem(
+        'Location permission is needed to list paired Bluetooth devices. '
+        'The app does not use your location.',
+        permanentlyDenied: location.isPermanentlyDenied,
+      );
+      return false;
+    }
+    // Only the trip notification depends on this, so the answer is not
+    // checked.
     try {
-      await Permission.location.request();
       await Permission.notification.request();
     } catch (err) {
       if (kDebugMode) {
-        debugPrint('[DrivePage] optional permission request failed: $err');
+        debugPrint('[DrivePage] notification permission request failed: $err');
       }
     }
+    return true;
+  }
+
+  void _showPermissionProblem(
+    String message, {
+    required bool permanentlyDenied,
+  }) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          permanentlyDenied ? '$message Allow it in app settings.' : message,
+        ),
+        action: permanentlyDenied
+            ? SnackBarAction(
+                label: 'Settings',
+                onPressed: () => unawaited(openAppSettings()),
+              )
+            : null,
+      ),
+    );
   }
 
   Future<bool> _connectDevice() async {
@@ -150,8 +173,11 @@ class _DrivePageState extends State<DrivePage> {
       devices = await obd.getPairedDevices();
     } catch (err) {
       if (mounted) {
+        final message = err.toString().contains('no_permissions')
+            ? 'Location permission is needed to list paired Bluetooth devices.'
+            : 'Failed to load paired devices: $err';
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to load paired devices: $err')),
+          SnackBar(content: Text(message)),
         );
       }
       return false;
@@ -190,14 +216,23 @@ class _DrivePageState extends State<DrivePage> {
   }
 
   Future<void> _startTrip() async {
-    final profile = context.read<ProfileProvider>().selectedProfile;
     final tripProvider = context.read<TripProvider>();
-    if (profile == null) {
+    var selected = context.read<ProfileProvider>().selectedProfile;
+    if (selected == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Select a profile first.')),
       );
       return;
     }
+    // With more than one car on file the selection carries over from the last
+    // session, so make the driver confirm it before anything is recorded — a
+    // trip cannot be moved to another profile once it has started.
+    if (shouldConfirmProfile(context)) {
+      final confirmed = await showConfirmProfileSheet(context);
+      if (!mounted || confirmed == null) return;
+      selected = confirmed;
+    }
+    final CarProfile profile = selected;
     final obd = context.read<ObdProvider>();
     if (!obd.connected) {
       final connected = await _connectDevice();
@@ -205,6 +240,10 @@ class _DrivePageState extends State<DrivePage> {
     }
     await obd.startLive();
     if (!mounted) return;
+    // Applied only now, so a cancelled device dialog or a failed connect above
+    // leaves the app's selected car exactly as the driver left it. From here on
+    // the dashboard header and the recorded trip name the same profile.
+    context.read<ProfileProvider>().selectProfile(profile);
     tripProvider.startTrip(profile);
     _activeProfile = profile;
     _tripSession += 1;
@@ -215,11 +254,6 @@ class _DrivePageState extends State<DrivePage> {
       _timeSeconds = 0;
       _lastChartUpdateMs = 0;
       _lastUiUpdateMs = 0;
-      _totalFuelMl = 0;
-      _distanceKm = 0;
-      _previousTime = null;
-      _previousFuel = 0;
-      _previousSpeed = 0;
       _recentFuel.clear();
       _recentSpeed.clear();
       _tripStats = LiveTripStats.zero;
@@ -287,8 +321,8 @@ class _DrivePageState extends State<DrivePage> {
   bool _isStaleReconnect(int session) =>
       !mounted || session != _tripSession || _activeProfile == null;
 
-  int _computeEcoScore(double rpm, double avgL100) {
-    if (_distanceKm < 0.1) return 0;
+  int _computeEcoScore(double rpm, double avgL100, double distanceKm) {
+    if (distanceKm < 0.1) return 0;
     // RPM component: lower is better. Sweet spot is 1200-2500.
     double rpmScore;
     if (rpm <= 0) {
@@ -346,11 +380,14 @@ class _DrivePageState extends State<DrivePage> {
     if (!mounted) return;
     final obd = context.read<ObdProvider>();
     final trip = context.read<TripProvider>();
-    const double defaultVePercent = 85;
-    final vePercent = obd.engineLoadPercent ?? defaultVePercent;
+    // A cycle in which the adapter or the ECU stopped answering carries only
+    // the last known values. Recording them would add distance and fuel that
+    // never happened; the trip integrator bridges or skips the gap instead.
+    if (!obd.telemetryFresh) return;
     final rawFuel = obd.calculateFuelFlow(
-      volumetricEfficiency: vePercent,
-      engineDisplacementLiters: profile.engineDisplacement ?? 2.0,
+      volumetricEfficiency: profile.volumetricEfficiency,
+      engineDisplacementLiters: profile.effectiveDisplacementLiters,
+      fuelType: profile.fuelType,
     );
     final fuel = rawFuel.isFinite && rawFuel >= 0 ? rawFuel : 0.0;
     _timeSeconds = _sampleStopwatch.elapsedMilliseconds / 1000.0;
@@ -366,21 +403,10 @@ class _DrivePageState extends State<DrivePage> {
       engineLoadPercent: obd.engineLoadPercent ?? 0,
       mafGramsPerSec: obd.mafGramsPerSec,
       equivRatio: obd.equivRatio,
+      stftPercent: obd.stftPercent,
+      ltftPercent: obd.ltftPercent,
     );
     trip.addSample(sample);
-
-    if (_previousTime != null) {
-      final dt = _timeSeconds - _previousTime!;
-      if (dt > 0 && dt < 5) {
-        final avgFuel = (_previousFuel + fuel) / 2;
-        _totalFuelMl += avgFuel * dt;
-        final avgSpeed = (_previousSpeed + obd.speedKph) / 2;
-        _distanceKm += (avgSpeed * dt) / 3600;
-      }
-    }
-    _previousTime = _timeSeconds;
-    _previousFuel = fuel;
-    _previousSpeed = obd.speedKph;
 
     _recentFuel.add(fuel);
     _recentSpeed.add(obd.speedKph);
@@ -404,21 +430,23 @@ class _DrivePageState extends State<DrivePage> {
     }
     if (!shouldUpdateUi) return;
 
-    final avgConsumption = _distanceKm > 0
-        ? (_totalFuelMl / 1000) / _distanceKm * 100
-        : 0.0;
+    // The same totals the saved trip will carry.
+    final totalFuelMl = trip.totalFuelMl;
+    final distanceKm = trip.distanceKm;
+    final avgConsumption =
+        distanceKm > 0 ? (totalFuelMl / 1000) / distanceKm * 100 : 0.0;
 
     final instantConsumption = _computeInstantConsumption();
     final costEstimate =
-        _fuelPricePerLiter > 0 ? (_totalFuelMl / 1000) * _fuelPricePerLiter : 0.0;
-    final ecoScore = _computeEcoScore(obd.rpm, avgConsumption);
+        _fuelPricePerLiter > 0 ? (totalFuelMl / 1000) * _fuelPricePerLiter : 0.0;
+    final ecoScore = _computeEcoScore(obd.rpm, avgConsumption, distanceKm);
 
     setState(() {
       _fuelFlow = smoothFuel;
       _lastUiUpdateMs = nowMs;
       _tripStats = LiveTripStats(
-        totalFuelMl: _totalFuelMl,
-        distanceKm: _distanceKm,
+        totalFuelMl: totalFuelMl,
+        distanceKm: distanceKm,
         avgConsumptionLPer100km: avgConsumption,
         instantConsumptionLPer100km: instantConsumption,
         costEstimate: costEstimate,
@@ -461,9 +489,8 @@ class _DrivePageState extends State<DrivePage> {
         );
       }
     }
-    // Same fallback as build(): a profile deleted mid-trip must not cost the
-    // user their trip summary.
-    final profile = profileProvider.selectedProfile ?? _activeProfile;
+    // The car the trip was recorded for, not whatever is selected now.
+    final profile = _activeProfile ?? profileProvider.selectedProfile;
     final samplesSnapshot = List<TripSample>.from(tripProvider.samples);
     final trip = await tripProvider.stopTrip();
     _activeProfile = null;
@@ -482,13 +509,13 @@ class _DrivePageState extends State<DrivePage> {
 
   @override
   Widget build(BuildContext context) {
-    // Fall back to the trip's own profile: if the selected profile is deleted
-    // mid-trip we must keep rendering the dashboard, otherwise the placeholder
-    // replaces the STOP button and the timer, poll loop and foreground
-    // notification are left running with no way to end them.
-    final profile =
-        context.watch<ProfileProvider>().selectedProfile ?? _activeProfile;
+    // While recording, the header always names the car the trip is computed
+    // for, whatever is selected elsewhere.
+    final selected = context.watch<ProfileProvider>().selectedProfile;
     final tripRunning = context.select<TripProvider, bool>((t) => t.running);
+    final profile = tripRunning
+        ? (_activeProfile ?? selected)
+        : (selected ?? _activeProfile);
     final connected = context.select<ObdProvider, bool>((o) => o.connected);
     if (profile == null) {
       return _buildNoProfile(context);

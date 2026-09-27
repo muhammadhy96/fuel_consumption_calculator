@@ -8,6 +8,7 @@ import '../../models/trip_sample.dart';
 import '../../state/trip_provider.dart';
 import '../../widgets/confirm_dialog.dart';
 import 'trip_chart.dart';
+import 'trip_export_actions.dart';
 
 class TripDetailsArguments {
   TripDetailsArguments({required this.profileName, required this.trip});
@@ -85,6 +86,10 @@ class _TripDetailsPageState extends State<TripDetailsPage> {
       appBar: AppBar(
         title: const Text('Trip Details'),
         actions: [
+          TripExportActions(
+            trip: trip,
+            profileName: widget.arguments.profileName,
+          ),
           IconButton(
             tooltip: 'Delete trip',
             icon: const Icon(Icons.delete_outline),

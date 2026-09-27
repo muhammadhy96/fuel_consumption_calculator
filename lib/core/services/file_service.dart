@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' show Rect;
 
 import 'package:csv/csv.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../models/trip_sample.dart';
 
@@ -24,6 +26,8 @@ const List<String> _tripCsvHeader = [
   'Engine Load (%)',
   'MAF (g/s)',
   'Eq Ratio',
+  'STFT (%)',
+  'LTFT (%)',
 ];
 
 /// Incremental trip CSV writer.
@@ -119,11 +123,62 @@ class TripCsvWriter {
       const ListToCsvConverter().convert(<List<dynamic>?>[row, null]);
 }
 
+/// Outcome of an export, so the UI can say what actually happened rather than
+/// guessing.
+enum TripExportStatus {
+  /// The trip left the app: shared, or written to the chosen location.
+  success,
+
+  /// The driver dismissed the share sheet or the save dialog.
+  cancelled,
+
+  /// The trip has no CSV on disk (recording failed, or the file was removed).
+  missingFile,
+
+  /// Something went wrong; [TripExportResult.message] says what.
+  failed,
+}
+
+class TripExportResult {
+  const TripExportResult(this.status, {this.message, this.savedPath});
+
+  const TripExportResult.success({this.savedPath})
+      : status = TripExportStatus.success,
+        message = null;
+
+  final TripExportStatus status;
+
+  /// Human-readable detail for [TripExportStatus.failed].
+  final String? message;
+
+  /// Where the copy landed, when the platform tells us.
+  final String? savedPath;
+
+  bool get isSuccess => status == TripExportStatus.success;
+}
+
 class FileService {
   Directory? _cachedDirectory;
 
+  /// Where trip CSVs are written.
+  ///
+  /// On Android and iOS this is always the app's own documents directory: it
+  /// needs no permission and, crucially, never blocks. The previous fallback
+  /// opened a system folder picker, which on mobile fired in the middle of
+  /// [openTripWriter] at trip start and handed back a SAF tree URI that
+  /// `dart:io` cannot write to — so the trip's CSV was lost. Getting a trip off
+  /// the phone is handled explicitly by [shareTripCsv] and [saveTripCsvCopy].
+  ///
+  /// On desktop the real Downloads folder is used, falling back to a folder the
+  /// user picks and then to documents.
   Future<Directory> _resolveOutputDirectory() async {
     if (_cachedDirectory != null) return _cachedDirectory!;
+
+    if (Platform.isAndroid || Platform.isIOS) {
+      final documents = await getApplicationDocumentsDirectory();
+      _cachedDirectory = documents;
+      return documents;
+    }
 
     Directory? downloads;
     try {
@@ -197,6 +252,121 @@ class FileService {
     ];
     await file.writeAsString(const ListToCsvConverter().convert(rows));
     return file.path;
+  }
+
+  /// Builds a filename a human can recognise in a Downloads folder or an email
+  /// attachment, e.g. `Golf_GTI_2026-09-22_14-05.csv`.
+  static String exportFileName(String profileName, DateTime startTime) {
+    final safeName = profileName
+        .replaceAll(RegExp(r'[^A-Za-z0-9 _-]'), '')
+        .trim()
+        .replaceAll(RegExp(r'\s+'), '_');
+    final stamp = '${startTime.year.toString().padLeft(4, '0')}-'
+        '${startTime.month.toString().padLeft(2, '0')}-'
+        '${startTime.day.toString().padLeft(2, '0')}_'
+        '${startTime.hour.toString().padLeft(2, '0')}-'
+        '${startTime.minute.toString().padLeft(2, '0')}';
+    final prefix = safeName.isEmpty ? 'trip' : safeName;
+    return '${prefix}_$stamp.csv';
+  }
+
+  /// Hands the trip CSV to the system share sheet.
+  ///
+  /// The file is copied to a temp directory under [exportName] first, so the
+  /// receiving app sees a readable name instead of the internal
+  /// `profile-1712...._trip_1712....csv`.
+  Future<TripExportResult> shareTripCsv(
+    String? csvPath, {
+    required String exportName,
+    String? subject,
+    Rect? sharePositionOrigin,
+  }) async {
+    final source = await _readableCsv(csvPath);
+    if (source == null) return const TripExportResult(TripExportStatus.missingFile);
+    try {
+      final staged = await _stageForExport(source, exportName);
+      final result = await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(staged.path, mimeType: 'text/csv', name: exportName)],
+          subject: subject,
+          sharePositionOrigin: sharePositionOrigin,
+        ),
+      );
+      if (result.status == ShareResultStatus.dismissed) {
+        return const TripExportResult(TripExportStatus.cancelled);
+      }
+      return const TripExportResult.success();
+    } catch (err) {
+      debugPrint('Failed to share trip CSV: $err');
+      return TripExportResult(TripExportStatus.failed, message: '$err');
+    }
+  }
+
+  /// Saves a copy of the trip CSV wherever the driver chooses — Downloads, a
+  /// Drive folder, anywhere the system file picker can reach.
+  ///
+  /// On Android and iOS the picker writes the bytes itself; on desktop it only
+  /// returns a destination, so the bytes are written here.
+  Future<TripExportResult> saveTripCsvCopy(
+    String? csvPath, {
+    required String exportName,
+  }) async {
+    final source = await _readableCsv(csvPath);
+    if (source == null) return const TripExportResult(TripExportStatus.missingFile);
+    try {
+      final bytes = await source.readAsBytes();
+      final isMobile = Platform.isAndroid || Platform.isIOS;
+      final destination = await FilePicker.platform.saveFile(
+        dialogTitle: 'Save trip CSV',
+        fileName: exportName,
+        // Only mobile wants the bytes: the picker writes the file itself there.
+        // macOS throws outright when they are supplied, and the desktop branch
+        // below does the write.
+        bytes: isMobile ? bytes : null,
+        type: FileType.custom,
+        allowedExtensions: const ['csv'],
+      );
+      if (destination == null) {
+        return const TripExportResult(TripExportStatus.cancelled);
+      }
+      // Desktop returns a path without writing anything to it.
+      if (!isMobile) {
+        await File(destination).writeAsBytes(bytes, flush: true);
+      }
+      return TripExportResult.success(savedPath: destination);
+    } catch (err) {
+      debugPrint('Failed to save trip CSV copy: $err');
+      return TripExportResult(TripExportStatus.failed, message: '$err');
+    }
+  }
+
+  /// The trip's CSV, or null when there is nothing on disk to export.
+  Future<File?> _readableCsv(String? csvPath) async {
+    if (csvPath == null || csvPath.isEmpty) return null;
+    final file = File(csvPath);
+    if (!await file.exists()) return null;
+    if (await file.length() == 0) return null;
+    return file;
+  }
+
+  /// Copies [source] into a scratch directory under [exportName].
+  ///
+  /// The directory is emptied first: staged copies are only needed for the
+  /// lifetime of one share sheet, and without this they accumulate in the cache
+  /// and two trips started in the same minute would collide on the same name.
+  Future<File> _stageForExport(File source, String exportName) async {
+    final tempDir = await getTemporaryDirectory();
+    final stageDir = Directory(p.join(tempDir.path, 'trip_exports'));
+    try {
+      if (await stageDir.exists()) {
+        await stageDir.delete(recursive: true);
+      }
+    } catch (err) {
+      debugPrint('Could not clear the trip export staging directory: $err');
+    }
+    await stageDir.create(recursive: true);
+    final staged = File(p.join(stageDir.path, exportName));
+    return source.copy(staged.path);
   }
 
   Future<List<TripSample>> loadTripSamples(String path) async {

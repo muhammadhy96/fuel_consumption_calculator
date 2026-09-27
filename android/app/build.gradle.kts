@@ -65,8 +65,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            if (hasReleaseSigning) {
-                signingConfig = signingConfigs.getByName("release")
+            // Without key.properties, fall back to the debug key so local release builds still install.
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
             }
         }
     }

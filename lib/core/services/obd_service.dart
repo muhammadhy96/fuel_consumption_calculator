@@ -7,6 +7,7 @@ import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:obd2_plugin/obd2_plugin.dart';
 
 import '../constants/obd_pids.dart';
+import '../utils/obd_frame_decoder.dart';
 import '../utils/pid_support.dart';
 import 'storage_service.dart';
 
@@ -62,6 +63,11 @@ class ObdService {
   Future<void> _commandLock = Future<void>.value();
   List<String> _pollCommands = const [];
 
+  /// PID keys requested by each entry of [_pollCommands], index for index.
+  List<List<String>> _pollCommandPids = const [];
+
+  static const ObdFrameDecoder _decoder = ObdFrameDecoder();
+
   static const int _maxTransientPollErrors = 3;
   static const int _maxBulkFailures = 2;
   static const int _maxConnectAttempts = 3;
@@ -74,6 +80,12 @@ class ObdService {
   static const Duration _warmStartTimeout = Duration(seconds: 2);
   static const Duration _protocolTimeout = Duration(seconds: 2);
   static const Duration _pidProbeTimeout = Duration(seconds: 5);
+
+  /// No reply at all from the adapter for this long means it has hung while
+  /// the Bluetooth link stays up; the link is then dropped so the reconnect
+  /// path can recover it. NO DATA / CAN ERROR replies (ECU off) do not count:
+  /// the adapter is alive and polling resumes by itself when the ECU returns.
+  static const Duration _maxAdapterSilence = Duration(seconds: 10);
   static const String _protocolCachePrefix = 'obd_protocol_';
 
   static final RegExp _protocolDigit = RegExp(r'[0-9A-Ca-c]');
@@ -220,6 +232,7 @@ class ObdService {
     _bulkModeActive = true;
     _bulkFailureStreak = 0;
     _pollCommands = const [];
+    _pollCommandPids = const [];
     _activeProtocol = null;
 
     String? cachedProtocol;
@@ -301,7 +314,11 @@ class ObdService {
       }
     }
 
-    // 8. Direct fuel rate replaces the MAF / speed-density estimate.
+    // 8. Multi-PID requests are only defined for CAN. K-line and J1850 ECUs
+    //    answer the first PID of a bulk request and drop the rest.
+    if (!_isCanProtocol(_activeProtocol)) _bulkModeActive = false;
+
+    // 9. Direct fuel rate replaces the MAF / speed-density estimate.
     _fuelRateSupported = _pidSupport.isSupported(fuelRatePidKey);
     _rebuildPollCommands();
     _log(
@@ -347,6 +364,7 @@ class ObdService {
 
   Future<void> _pollLoop() async {
     final cycleWatch = Stopwatch();
+    final adapterSilence = Stopwatch()..start();
     while (_isPolling && _connected) {
       try {
         if (_pollCommands.isEmpty) {
@@ -357,12 +375,22 @@ class ObdService {
         cycleWatch
           ..reset()
           ..start();
-        for (final command in _pollCommands) {
+        // Captured once: a bulk-mode fallback rebuilds both lists mid-cycle.
+        final commands = _pollCommands;
+        final commandPids = _pollCommandPids;
+        for (var c = 0; c < commands.length; c++) {
+          final command = commands[c];
           final response = await _sendCommand(command);
+          if (response.isNotEmpty) adapterSilence.reset();
           if (_isNegativeResponse(response)) {
             _registerBulkFailure(command, response);
           } else {
-            _bulkFailureStreak = 0;
+            if (c < commandPids.length &&
+                _isPartialBulkReply(commandPids[c], response)) {
+              _registerBulkFailure(command, 'partial reply "$response"');
+            } else {
+              _bulkFailureStreak = 0;
+            }
             onDataReceived?.call(response);
           }
           if (!_isPolling || !_connected) break;
@@ -372,6 +400,13 @@ class ObdService {
 
         onCycleComplete?.call();
         _pollErrorStreak = 0;
+        if (adapterSilence.elapsed > _maxAdapterSilence) {
+          _log('adapter silent for ${adapterSilence.elapsed.inSeconds} s — '
+              'dropping the link so it can be re-established');
+          _markDisconnected();
+          await _disconnectTransport();
+          break;
+        }
         await _delayWhileActive(_interCycleDelay);
       } catch (err) {
         if (!_isPolling || !_connected) break;
@@ -405,6 +440,34 @@ class ObdService {
     _bulkFailureStreak = 0;
     _rebuildPollCommands();
     _log('bulk multi-PID rejected — falling back to single-PID requests');
+  }
+
+  /// True when a positive reply to a multi-PID request is missing an essential
+  /// PID the ECU should have answered, the signature of an ECU that only
+  /// answers the first PID of a bulk request.
+  bool _isPartialBulkReply(List<String> requested, String response) {
+    if (requested.length < 2) return false;
+    final expected = [
+      for (final pid in requested)
+        if (essentialPidKeys.contains(pid) && _expectsPid(pid)) pid,
+    ];
+    if (expected.isEmpty) return false;
+    final answered = _decoder.decode(response).values;
+    return expected.any((pid) => !answered.containsKey(pid));
+  }
+
+  /// Whether the ECU should answer [pid]: per its bitmask when one was parsed,
+  /// otherwise only for RPM and speed, which every OBD-II car supports.
+  bool _expectsPid(String pid) => _pidSupport.parsed
+      ? _pidSupport.isSupported(pid)
+      : pid == '010C' || pid == '010D';
+
+  /// ELM327 protocols 1-5 are SAE J1850 and ISO 9141 / 14230 (K-line); 6-C
+  /// are CAN. An unknown protocol keeps bulk mode, and a partial reply then
+  /// turns it off.
+  static bool _isCanProtocol(String? protocol) {
+    if (protocol == null) return true;
+    return !const {'1', '2', '3', '4', '5'}.contains(protocol);
   }
 
   /// Writes [command] to the adapter and waits for its prompt-terminated
@@ -496,6 +559,7 @@ class ObdService {
     _isPolling = false;
     _fuelRateSupported = false;
     _pollCommands = const [];
+    _pollCommandPids = const [];
     _completePendingResponse();
     if (notify && wasConnected) {
       onDisconnected?.call();
@@ -513,9 +577,20 @@ class ObdService {
   /// Recomputes the per-cycle command list from the supported-PID bitmask.
   void _rebuildPollCommands() {
     final desired = _desiredPollPids();
-    _pollCommands = _bulkModeActive
-        ? _pidSupport.buildBulkCommands(desired)
-        : _pidSupport.buildSingleCommands(desired);
+    final groupSize = _bulkModeActive ? maxPidsPerBulkRequest : 1;
+    final groups = <List<String>>[
+      for (var start = 0; start < desired.length; start += groupSize)
+        desired.sublist(
+          start,
+          start + groupSize < desired.length
+              ? start + groupSize
+              : desired.length,
+        ),
+    ];
+    _pollCommandPids = groups;
+    _pollCommands = [
+      for (final group in groups) ..._pidSupport.buildBulkCommands(group),
+    ];
   }
 
   /// [pollPidKeys] filtered by the ECU bitmask, with [essentialPidKeys] unioned
@@ -588,19 +663,31 @@ class ObdService {
     debugPrint('[OBD] $message');
   }
 
-  /// Calculates instantaneous fuel flow (mL/s) from RPM + MAP + IAT, using
-  /// the speed-density formula when MAF is not available.
+  /// Calculates instantaneous fuel flow (mL/s) from MAF, or from RPM + MAP +
+  /// IAT via speed-density when MAF is not available.
+  ///
+  /// The ECU's closed-loop fuel trims ([stftPercent] + [ltftPercent]) scale
+  /// the open-loop fuel mass, following Applied Sciences 16, 5879:
+  ///   m_fuel = (m_air / AFR) * (1 + (STFT + LTFT) / 100)
   double fuelFlow(
     double rpm,
     double mapKpa,
     double iatKelvin, {
     required double volumetricEfficiency,
     required double engineDisplacementLiters,
+    String fuelType = 'Petrol',
     double equivRatio = 1.0,
     double? mafGramsPerSec,
+    double stftPercent = 0,
+    double ltftPercent = 0,
   }) {
     if (rpm <= 0) return 0;
-    final actualAfr = 14.7 * (equivRatio <= 0 ? 1.0 : equivRatio);
+    final isDiesel = fuelType.toLowerCase() == 'diesel';
+    final stoichAfr = isDiesel ? 14.5 : 14.7;
+    final densityGramsPerLiter = isDiesel ? 832.0 : 745.0;
+    // Out-of-range λ means the PID is unsupported or the frame was garbage.
+    final lambda = equivRatio >= 0.5 && equivRatio <= 10 ? equivRatio : 1.0;
+    final actualAfr = stoichAfr * lambda;
 
     final gramsOfAir = mafGramsPerSec ??
         _calcGramsOfAir(
@@ -610,9 +697,53 @@ class ObdService {
           volumetricEfficiency: volumetricEfficiency,
           engineDisplacementLiters: engineDisplacementLiters,
         );
-    final gramsOfFuel = gramsOfAir / actualAfr;
-    // 745 g/L is approximate density of petrol; 1000 converts L → mL.
-    return (gramsOfFuel / 745) * 1000;
+    final gramsOfFuel =
+        gramsOfAir / actualAfr * fuelTrimFactor(stftPercent, ltftPercent);
+    return (gramsOfFuel / densityGramsPerLiter) * 1000;
+  }
+
+  /// Multiplier (1 + (STFT + LTFT) / 100). Non-finite trims count as 0 and the
+  /// combined trim is clamped to ±50 %, well past any healthy ECU's limits,
+  /// so a garbage frame cannot blow up the estimate.
+  static double fuelTrimFactor(double stftPercent, double ltftPercent) {
+    final stft = stftPercent.isFinite ? stftPercent : 0.0;
+    final ltft = ltftPercent.isFinite ? ltftPercent : 0.0;
+    return 1 + (stft + ltft).clamp(-50.0, 50.0) / 100;
+  }
+
+  /// Engine speed below which an engine is idling or about to, and the ECU
+  /// keeps injecting fuel so it does not stall.
+  static const double fuelCutMinRpm = 1200;
+
+  /// Detects deceleration fuel cut-off: the car is moving in gear above idle
+  /// with the throttle closed, and the injectors are off. Air keeps flowing,
+  /// so the air-based estimate would otherwise count fuel that is not burned.
+  ///
+  /// [closedThrottlePercent] is the throttle reading learned at idle; a
+  /// commanded lambda of exactly 0 is the ECU itself reporting the cut.
+  static bool isOverrunFuelCut({
+    required double rpm,
+    required double speedKph,
+    required bool isDiesel,
+    double? throttlePercent,
+    double? closedThrottlePercent,
+    double? mapKpa,
+    double? baroKpa,
+    double? lambda,
+  }) {
+    if (rpm <= 0) return false;
+    if (lambda == 0) return true;
+    if (rpm < fuelCutMinRpm || speedKph < 10) return false;
+    if (throttlePercent != null && closedThrottlePercent != null) {
+      return throttlePercent <= closedThrottlePercent + 1.5;
+    }
+    // Without a throttle reading, a deep manifold vacuum above idle means the
+    // throttle is shut. Diesels have no throttle, so this says nothing there.
+    if (!isDiesel && mapKpa != null && mapKpa > 0) {
+      final baro = baroKpa != null && baroKpa > 0 ? baroKpa : 101.3;
+      return mapKpa < 0.3 * baro;
+    }
+    return false;
   }
 
   double _calcGramsOfAir({
