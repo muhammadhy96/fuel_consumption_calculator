@@ -1,17 +1,17 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:obd2_plugin/obd2_plugin.dart';
 
 import '../constants/obd_pids.dart';
 import '../utils/obd_frame_decoder.dart';
 import '../utils/pid_support.dart';
+import 'obd_transport.dart';
 import 'storage_service.dart';
 
-/// Handles Bluetooth OBD-II transport and orchestrates bulk PID polling.
+/// Drives an ELM327 over a Bluetooth or Wi-Fi [ObdTransport] and orchestrates
+/// bulk PID polling.
 ///
 /// Strategy:
 ///   * Establish the ELM327 session with a prompt-synchronised init script —
@@ -22,15 +22,14 @@ import 'storage_service.dart';
 ///   * Each poll cycle sends bulk mode-01 requests (max 6 PIDs each)
 ///     back-to-back, covering all telemetry PIDs every cycle. Adapters that
 ///     reject multi-PID requests fall back to one command per PID.
-///   * The negotiated protocol is cached per device address so reconnects skip
+///   * The negotiated protocol is cached per adapter so reconnects skip
 ///     the ELM327 auto-search.
 class ObdService {
   ObdService(this._storage);
 
   final StorageService _storage;
 
-  Obd2Plugin _obd2 = Obd2Plugin();
-  Obd2Plugin get obd2 => _obd2;
+  ObdTransport? _transport;
 
   PidSupport _pidSupport = PidSupport();
 
@@ -43,7 +42,6 @@ class ObdService {
   void Function()? onCycleComplete;
 
   bool _connected = false;
-  bool _listenerReady = false;
   bool _isPolling = false;
   bool _fuelRateSupported = false;
   bool _bulkModeActive = true;
@@ -82,11 +80,13 @@ class ObdService {
   static const Duration _pidProbeTimeout = Duration(seconds: 5);
 
   /// No reply at all from the adapter for this long means it has hung while
-  /// the Bluetooth link stays up; the link is then dropped so the reconnect
+  /// the link stays up; the link is then dropped so the reconnect
   /// path can recover it. NO DATA / CAN ERROR replies (ECU off) do not count:
   /// the adapter is alive and polling resumes by itself when the ECU returns.
   static const Duration _maxAdapterSilence = Duration(seconds: 10);
   static const String _protocolCachePrefix = 'obd_protocol_';
+  static const String _wifiHostKey = 'obd_wifi_host';
+  static const String _wifiPortKey = 'obd_wifi_port';
 
   static final RegExp _protocolDigit = RegExp(r'[0-9A-Ca-c]');
 
@@ -111,23 +111,52 @@ class ObdService {
   /// an adapter the user already paired.
   Future<List<BluetoothDevice>> getPairedDevices() async {
     await FlutterBluetoothSerial.instance.requestEnable();
-    return await _obd2.getPairedDevices;
+    return await Obd2Plugin().getPairedDevices;
   }
 
-  Future<void> connect(BluetoothDevice device) async {
-    await FlutterBluetoothSerial.instance.requestEnable();
+  /// The Wi-Fi adapter address used last, or the ELM327 factory default.
+  Future<ObdDevice> lastWifiDevice() async {
+    String? host;
+    int? port;
+    try {
+      host = await _storage.getSetting(_wifiHostKey);
+      port = int.tryParse(await _storage.getSetting(_wifiPortKey) ?? '');
+    } catch (err) {
+      _log('wifi address read failed: $err');
+    }
+    return ObdDevice.wifi(
+      host: host == null || host.isEmpty ? ObdDevice.defaultWifiHost : host,
+      port: port ?? ObdDevice.defaultWifiPort,
+    );
+  }
+
+  Future<void> _rememberWifiDevice(ObdDevice device) async {
+    try {
+      await _storage.setSetting(_wifiHostKey, device.address);
+      await _storage.setSetting(_wifiPortKey, '${device.port}');
+    } catch (err) {
+      _log('wifi address write failed: $err');
+    }
+  }
+
+  Future<void> connect(ObdDevice device) async {
     await disconnect(notify: false);
     for (var attempt = 1; attempt <= _maxConnectAttempts; attempt++) {
+      final transport = device.createTransport();
       try {
-        await _connectInternal(device);
+        await _connectInternal(device, transport);
+        if (device.type == ObdConnectionType.wifi) {
+          await _rememberWifiDevice(device);
+        }
         return;
-      } on PlatformException catch (err) {
-        final isConnectError = err.code == 'connect_error';
+      } on _TransportOpenError catch (wrapped) {
         final isLastAttempt = attempt >= _maxConnectAttempts;
-        if (!isConnectError || isLastAttempt) rethrow;
+        if (!transport.isRetryableOpenError(wrapped.cause) || isLastAttempt) {
+          Error.throwWithStackTrace(wrapped.cause, wrapped.stackTrace);
+        }
         debugPrint(
-          'OBD connect_error (attempt $attempt/$_maxConnectAttempts): '
-          '${err.message}',
+          'OBD open failed (attempt $attempt/$_maxConnectAttempts): '
+          '${wrapped.cause}',
         );
         await _disconnectTransport();
         await Future.delayed(
@@ -140,62 +169,36 @@ class ObdService {
     }
   }
 
-  Future<void> _connectInternal(BluetoothDevice device) async {
+  Future<void> _connectInternal(
+    ObdDevice device,
+    ObdTransport transport,
+  ) async {
     final attemptToken = ++_connectAttemptToken;
     final readyCompleter = Completer<void>();
     _readyCompleter = readyCompleter;
     unawaited(readyCompleter.future.catchError((_) {}));
     try {
-      await _obd2.getConnection(
-        device,
-        (connection) async {
-          if (_connectAttemptToken != attemptToken) return;
-          try {
-            await _ensureListener();
-            await _initObd(device);
-            _connected = true;
-            _pollErrorStreak = 0;
-            if (!readyCompleter.isCompleted) {
-              readyCompleter.complete();
-            }
-          } catch (err) {
-            if (!readyCompleter.isCompleted) {
-              readyCompleter.completeError(err);
-            }
-          }
-        },
-        (err) {
-          if (_connectAttemptToken != attemptToken) return;
-          _markDisconnected();
-          if (!readyCompleter.isCompleted) {
-            readyCompleter.completeError(err);
-          }
-        },
-      );
+      _transport = transport;
+      try {
+        await transport
+            .open(onPayload: _handleTransportPayload)
+            .timeout(const Duration(seconds: 15));
+      } catch (err, stack) {
+        throw _TransportOpenError(err, stack);
+      }
+      if (_connectAttemptToken != attemptToken) return;
+      await _initObd(device);
+      _connected = true;
+      _pollErrorStreak = 0;
+      if (!readyCompleter.isCompleted) readyCompleter.complete();
     } catch (err) {
-      if (_connectAttemptToken == attemptToken && !readyCompleter.isCompleted) {
-        readyCompleter.completeError(err);
+      if (!readyCompleter.isCompleted) {
+        readyCompleter.completeError(
+          err is _TransportOpenError ? err.cause : err,
+        );
       }
       rethrow;
     }
-    // Backstop only: every init command carries its own timeout, so this just
-    // guards against getConnection itself hanging. The worst-case prompt-synced
-    // init (including one cached-protocol retry) has to fit inside it.
-    await readyCompleter.future.timeout(const Duration(seconds: 30));
-  }
-
-  Future<void> _ensureListener() async {
-    if (_listenerReady) return;
-    // The plugin attaches its input listener to `connection`, and refuses a
-    // second registration — registering before the socket exists would leave
-    // us permanently deaf.
-    if (_obd2.connection == null) return;
-
-    await _obd2.setOnDataReceived((command, response, requestCode) {
-      _handleTransportPayload('$command: $response');
-    });
-
-    _listenerReady = true;
   }
 
   /// Single delivery point for adapter responses.
@@ -225,8 +228,8 @@ class ObdService {
   /// When a protocol was cached for this device we warm-start and select it
   /// directly; if the ECU then fails to answer `01 00` the cache is dropped and
   /// the whole sequence is retried once with `AT Z` + `AT SP 0`.
-  Future<void> _initObd(BluetoothDevice device, {bool useCache = true}) async {
-    final cacheKey = '$_protocolCachePrefix${device.address}';
+  Future<void> _initObd(ObdDevice device, {bool useCache = true}) async {
+    final cacheKey = '$_protocolCachePrefix${device.id}';
     _pidSupport = PidSupport();
     _fuelRateSupported = false;
     _bulkModeActive = true;
@@ -329,7 +332,6 @@ class ObdService {
 
   Future<bool> startListening(Function(String) onData) async {
     onDataReceived = onData;
-    await _ensureListener();
     await _readyCompleter?.future;
 
     if (!_connected) return false;
@@ -477,16 +479,14 @@ class ObdService {
   /// response can never complete the next command's completer.
   Future<String> _sendCommand(String command, {Duration? timeout}) {
     return _withCommandLock(() async {
-      final conn = _obd2.connection;
-      if (conn == null || !conn.isConnected) {
-        throw StateError('OBD Bluetooth connection lost');
+      final transport = _transport;
+      if (transport == null || !transport.isConnected) {
+        throw StateError('OBD connection lost');
       }
       final completer = Completer<String>();
       _pendingResponse = completer;
       try {
-        // ELM327 terminates on CR; a trailing LF is echoed back as noise.
-        conn.output.add(Uint8List.fromList(utf8.encode('$command\r')));
-        await conn.output.allSent;
+        await transport.write(command);
         return await completer.future.timeout(
           timeout ?? _commandTimeout,
           onTimeout: () {
@@ -524,10 +524,10 @@ class ObdService {
   Future<T> _withCommandLock<T>(Future<T> Function() action) {
     final generation = _transportGeneration;
     final next = _commandLock.then<T>((_) {
-      final conn = _obd2.connection;
+      final transport = _transport;
       if (generation != _transportGeneration ||
-          conn == null ||
-          !conn.isConnected) {
+          transport == null ||
+          !transport.isConnected) {
         throw StateError('OBD connection closed');
       }
       return action();
@@ -539,17 +539,15 @@ class ObdService {
   Future<void> _disconnectTransport() async {
     _transportGeneration += 1;
     _completePendingResponse();
+    final transport = _transport;
+    _transport = null;
     try {
-      await _obd2.disconnect();
+      await transport?.close();
     } catch (err) {
       _log('transport disconnect failed: $err');
     }
-    _listenerReady = false;
     _desynced = false;
     _consecutiveTimeouts = 0;
-    // A fresh instance is mandatory: the plugin refuses a second
-    // setOnDataReceived and getConnection would reuse the stale connection.
-    _obd2 = Obd2Plugin();
   }
 
   void _markDisconnected({bool notify = true}) {
@@ -831,4 +829,13 @@ class ObdService {
       return null;
     }
   }
+}
+
+/// Marks a failure of [ObdTransport.open] so [ObdService.connect] retries only
+/// link-level errors, never an init script the ECU rejected.
+class _TransportOpenError {
+  _TransportOpenError(this.cause, this.stackTrace);
+
+  final Object cause;
+  final StackTrace stackTrace;
 }

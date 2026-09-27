@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 
 import '../core/services/obd_service.dart';
+import '../core/services/obd_transport.dart';
 import '../core/utils/obd_frame_decoder.dart';
 
 /// Where the current fuel-flow figure comes from.
@@ -26,7 +27,7 @@ class ObdProvider extends ChangeNotifier {
 
   static const ObdFrameDecoder _decoder = ObdFrameDecoder();
 
-  BluetoothDevice? _connectedDevice;
+  ObdDevice? _connectedDevice;
   bool _connected = false;
   bool _live = false;
   VoidCallback? onFrame;
@@ -79,11 +80,11 @@ class ObdProvider extends ChangeNotifier {
   final Queue<double> _smoothFuelWindow = Queue<double>();
   double _smoothFuelSum = 0;
 
-  BluetoothDevice? get device => _connectedDevice;
+  ObdDevice? get device => _connectedDevice;
 
   /// Last device we were connected to, retained across a drop so reconnect
   /// works.
-  BluetoothDevice? get lastDevice => _connectedDevice;
+  ObdDevice? get lastDevice => _connectedDevice;
 
   bool get connected => _connected;
   bool get live => _live;
@@ -108,9 +109,11 @@ class ObdProvider extends ChangeNotifier {
   Future<List<BluetoothDevice>> getPairedDevices() =>
       _obdService.getPairedDevices();
 
-  Future<void> connect(BluetoothDevice device) async {
+  Future<ObdDevice> lastWifiDevice() => _obdService.lastWifiDevice();
+
+  Future<void> connect(ObdDevice device) async {
     await _obdService.connect(device);
-    if (_connectedDevice?.address != device.address) {
+    if (_connectedDevice?.id != device.id) {
       _closedThrottlePercent = null;
     }
     _connectedDevice = device;

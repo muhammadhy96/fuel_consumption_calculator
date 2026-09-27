@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -6,6 +7,7 @@ import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/services/obd_transport.dart';
 import '../../core/services/trip_foreground_service.dart';
 import '../../core/theme/app_theme.dart';
 import '../../features/drive/confirm_profile_sheet.dart';
@@ -132,8 +134,13 @@ class _DrivePageState extends State<DrivePage> {
       );
       return false;
     }
-    // Only the trip notification depends on this, so the answer is not
-    // checked.
+    await _requestNotificationPermission();
+    return true;
+  }
+
+  /// Only the trip notification depends on this, so the answer is not
+  /// checked.
+  Future<void> _requestNotificationPermission() async {
     try {
       await Permission.notification.request();
     } catch (err) {
@@ -141,7 +148,6 @@ class _DrivePageState extends State<DrivePage> {
         debugPrint('[DrivePage] notification permission request failed: $err');
       }
     }
-    return true;
   }
 
   void _showPermissionProblem(
@@ -165,8 +171,57 @@ class _DrivePageState extends State<DrivePage> {
   }
 
   Future<bool> _connectDevice() async {
-    if (!await _requestPermissions()) return false;
-    if (!mounted) return false;
+    final type = await showDialog<ObdConnectionType>(
+      context: context,
+      builder: (_) => const _ConnectionTypeDialog(),
+    );
+    if (type == null || !mounted) return false;
+    final device = type == ObdConnectionType.wifi
+        ? await _pickWifiDevice()
+        : await _pickBluetoothDevice();
+    if (device == null || !mounted) return false;
+    final obd = context.read<ObdProvider>();
+    try {
+      await obd.connect(device);
+      final sample = await obd.verifyConnection();
+      await obd.startLive();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              sample != null
+                  ? 'Connected — receiving OBD frames'
+                  : 'Connected to ${device.name}, waiting for data...',
+            ),
+          ),
+        );
+      }
+      return true;
+    } catch (err) {
+      if (mounted) {
+        final msg = _classifyObdError(err, device.type);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(msg)),
+        );
+      }
+      return false;
+    }
+  }
+
+  Future<ObdDevice?> _pickWifiDevice() async {
+    await _requestNotificationPermission();
+    if (!mounted) return null;
+    final last = await context.read<ObdProvider>().lastWifiDevice();
+    if (!mounted) return null;
+    return showDialog<ObdDevice>(
+      context: context,
+      builder: (_) => _WifiDeviceDialog(initial: last),
+    );
+  }
+
+  Future<ObdDevice?> _pickBluetoothDevice() async {
+    if (!await _requestPermissions()) return null;
+    if (!mounted) return null;
     final obd = context.read<ObdProvider>();
     List<BluetoothDevice> devices;
     try {
@@ -180,39 +235,14 @@ class _DrivePageState extends State<DrivePage> {
           SnackBar(content: Text(message)),
         );
       }
-      return false;
+      return null;
     }
-    if (!mounted) return false;
+    if (!mounted) return null;
     final device = await showDialog<BluetoothDevice>(
       context: context,
       builder: (_) => _DeviceDialog(devices: devices),
     );
-    if (device == null) return false;
-    try {
-      await obd.connect(device);
-      final sample = await obd.verifyConnection();
-      await obd.startLive();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              sample != null
-                  ? 'Connected — receiving OBD frames'
-                  : 'Connected to ${device.name ?? 'device'}, waiting for data...',
-            ),
-          ),
-        );
-      }
-      return true;
-    } catch (err) {
-      if (mounted) {
-        final msg = _classifyObdError(err);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(msg)),
-        );
-      }
-      return false;
-    }
+    return device == null ? null : ObdDevice.bluetooth(device);
   }
 
   Future<void> _startTrip() async {
@@ -352,8 +382,13 @@ class _DrivePageState extends State<DrivePage> {
     return ((rpmScore * 0.4 + consumptionScore * 0.6)).round().clamp(0, 100);
   }
 
-  String _classifyObdError(Object err) {
+  String _classifyObdError(Object err, ObdConnectionType type) {
     final msg = err.toString().toLowerCase();
+    if (type == ObdConnectionType.wifi &&
+        (err is SocketException || err is TimeoutException)) {
+      return 'Cannot reach the Wi-Fi adapter. Join its Wi-Fi network and '
+          'check the IP address and port.';
+    }
     if (msg.contains('bluetooth') && msg.contains('off')) {
       return 'Bluetooth is turned off. Enable it in system settings.';
     }
@@ -703,3 +738,147 @@ class _DeviceDialog extends StatelessWidget {
   }
 }
 
+
+class _ConnectionTypeDialog extends StatelessWidget {
+  const _ConnectionTypeDialog();
+
+  @override
+  Widget build(BuildContext context) {
+    Widget option(
+      ObdConnectionType type,
+      IconData icon,
+      String title,
+      String subtitle,
+    ) =>
+        ListTile(
+          leading: Icon(icon, color: AppTheme.accentCyan),
+          title: Text(title, style: const TextStyle(color: Colors.white)),
+          subtitle:
+              Text(subtitle, style: const TextStyle(color: Colors.white54)),
+          onTap: () => Navigator.of(context).pop(type),
+        );
+
+    return Dialog(
+      backgroundColor: AppTheme.surfaceDarkElevated,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(20),
+              child: Row(
+                children: [
+                  Icon(Icons.cable, color: AppTheme.accentCyan),
+                  SizedBox(width: 10),
+                  Text(
+                    'Connect OBD Adapter',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 17,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Divider(height: 1, color: Colors.white.withValues(alpha: 0.08)),
+            option(ObdConnectionType.bluetooth, Icons.bluetooth, 'Bluetooth',
+                'Paired ELM327 adapter'),
+            option(ObdConnectionType.wifi, Icons.wifi, 'Wi-Fi',
+                'ELM327 on its own Wi-Fi network'),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _WifiDeviceDialog extends StatefulWidget {
+  const _WifiDeviceDialog({required this.initial});
+
+  final ObdDevice initial;
+
+  @override
+  State<_WifiDeviceDialog> createState() => _WifiDeviceDialogState();
+}
+
+class _WifiDeviceDialogState extends State<_WifiDeviceDialog> {
+  final _formKey = GlobalKey<FormState>();
+  late final TextEditingController _host =
+      TextEditingController(text: widget.initial.address);
+  late final TextEditingController _port =
+      TextEditingController(text: '${widget.initial.port}');
+
+  @override
+  void dispose() {
+    _host.dispose();
+    _port.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    if (!_formKey.currentState!.validate()) return;
+    Navigator.of(context).pop(
+      ObdDevice.wifi(host: _host.text.trim(), port: int.parse(_port.text)),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const fieldStyle = TextStyle(color: Colors.white);
+    return AlertDialog(
+      backgroundColor: AppTheme.surfaceDarkElevated,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      title: const Text(
+        'Wi-Fi OBD Adapter',
+        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+      ),
+      content: Form(
+        key: _formKey,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Join the Wi-Fi network of the adapter first. Most adapters '
+              'use ${ObdDevice.defaultWifiHost}:${ObdDevice.defaultWifiPort}.',
+              style: TextStyle(color: Colors.white70, fontSize: 13),
+            ),
+            const SizedBox(height: 12),
+            TextFormField(
+              controller: _host,
+              style: fieldStyle,
+              keyboardType: TextInputType.url,
+              decoration: const InputDecoration(labelText: 'IP address'),
+              validator: (v) =>
+                  v == null || v.trim().isEmpty ? 'Enter the adapter IP' : null,
+            ),
+            TextFormField(
+              controller: _port,
+              style: fieldStyle,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'Port'),
+              validator: (v) {
+                final port = int.tryParse(v ?? '');
+                return port == null || port < 1 || port > 65535
+                    ? 'Enter a port between 1 and 65535'
+                    : null;
+              },
+              onFieldSubmitted: (_) => _submit(),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('Connect')),
+      ],
+    );
+  }
+}
