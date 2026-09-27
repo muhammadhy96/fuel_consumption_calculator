@@ -44,6 +44,7 @@ class ObdProvider extends ChangeNotifier {
   double equivRatio = 1.0;
   double stftPercent = 0;
   double ltftPercent = 0;
+  int? fuelSystemStatus;
   double iatKelvin = 0;
   double coolantKelvin = 0;
   double throttlePercent = 0;
@@ -238,6 +239,7 @@ class ObdProvider extends ChangeNotifier {
       mapKpa: _isFresh('010B') ? mapKpa : null,
       baroKpa: _isFresh('0133') ? baroKpa : null,
       lambda: lambda,
+      fuelSystemStatus: _isFresh('0103') ? fuelSystemStatus : null,
     );
     if (fuelCut) return 0;
     final iat = iatKelvin > 0 && _isFresh('010F') ? iatKelvin : 293.15;
@@ -360,6 +362,9 @@ class ObdProvider extends ChangeNotifier {
         case '0144':
           equivRatio = value;
           break;
+        case '0103':
+          fuelSystemStatus = value.toInt();
+          break;
         case '0106':
           stftPercent = value;
           break;
@@ -423,6 +428,7 @@ class ObdProvider extends ChangeNotifier {
     equivRatio = 1.0;
     stftPercent = 0;
     ltftPercent = 0;
+    fuelSystemStatus = null;
     iatKelvin = 0;
     coolantKelvin = 0;
     throttlePercent = 0;

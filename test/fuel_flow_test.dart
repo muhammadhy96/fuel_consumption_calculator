@@ -468,6 +468,7 @@ void main() {
       double? closedThrottle,
       double? mapKpa,
       double? lambda,
+      int? status,
     }) =>
         ObdService.isOverrunFuelCut(
           rpm: rpm,
@@ -477,6 +478,7 @@ void main() {
           closedThrottlePercent: closedThrottle,
           mapKpa: mapKpa,
           lambda: lambda,
+          fuelSystemStatus: status,
         );
 
     test('closed throttle while moving above idle is a cut', () {
@@ -508,6 +510,24 @@ void main() {
     test('a commanded lambda of 0 is the ECU reporting the cut', () {
       expect(cut(rpm: 900, speedKph: 0, lambda: 0), isTrue);
       expect(cut(rpm: 0, lambda: 0), isFalse);
+    });
+
+    test('closed-loop status from PID 0103 overrides a closed throttle', () {
+      expect(cut(throttle: 12.2, closedThrottle: 12.2, status: 0x02), isFalse);
+      expect(cut(mapKpa: 25, status: 0x10), isFalse);
+    });
+
+    test('status 0x04 with a closed throttle is a confirmed cut', () {
+      expect(cut(throttle: 12.3, closedThrottle: 12.2, status: 0x04), isTrue);
+    });
+
+    test('status 0x04 with an open throttle is power enrichment', () {
+      expect(cut(throttle: 80, closedThrottle: 12.2, status: 0x04), isFalse);
+      expect(cut(mapKpa: 95, status: 0x04), isFalse);
+    });
+
+    test('unrecognised status falls back to inference', () {
+      expect(cut(throttle: 12.2, closedThrottle: 12.2, status: 0x01), isTrue);
     });
   });
   group('fuel trims', () {

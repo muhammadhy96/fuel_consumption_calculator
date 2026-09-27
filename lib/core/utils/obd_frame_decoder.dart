@@ -13,6 +13,7 @@ class ObdDecodeResult {
   ///   '0105' Kelvin         '0111' percent     '0142' volts
   ///   '012F' percent        '0133' kPa         '0144' ratio (lambda)
   ///   '0106' percent        '0107' percent     (fuel trims, -100..+99.2)
+  ///   '0103' bank-1 fuel system status byte (0x04 = open loop / fuel cut)
   ///   '015E' mL/s           (already converted from L/h)
   final Map<String, double> values;
 
@@ -183,6 +184,9 @@ class ObdFrameDecoder {
       case '0111':
       case '012F':
         values[pidKey] = (bytes[start] * 100) / 255;
+        break;
+      case '0103':
+        values[pidKey] = bytes[start].toDouble();
         break;
       case '0106':
       case '0107':

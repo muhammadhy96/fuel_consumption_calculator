@@ -721,6 +721,11 @@ class ObdService {
   ///
   /// [closedThrottlePercent] is the throttle reading learned at idle; a
   /// commanded lambda of exactly 0 is the ECU itself reporting the cut.
+  /// PID 0103 bank-1 values (SAE J1979).
+  static const int fuelSystemClosedLoop = 0x02;
+  static const int fuelSystemOpenLoopLoadOrCut = 0x04;
+  static const int fuelSystemClosedLoopFault = 0x10;
+
   static bool isOverrunFuelCut({
     required double rpm,
     required double speedKph,
@@ -730,9 +735,30 @@ class ObdService {
     double? mapKpa,
     double? baroKpa,
     double? lambda,
+    int? fuelSystemStatus,
   }) {
     if (rpm <= 0) return false;
     if (lambda == 0) return true;
+    // PID 0103 is the ECU's own report of its fuelling mode, so it wins over
+    // every inference below whenever the car supplies a recognised value.
+    switch (fuelSystemStatus) {
+      case fuelSystemClosedLoop:
+      case fuelSystemClosedLoopFault:
+        return false;
+      case fuelSystemOpenLoopLoadOrCut:
+        // 0x04 covers both deceleration fuel cut and power enrichment; only
+        // a throttle that is clearly open makes it enrichment. A car that is
+        // standing still cannot be on overrun.
+        if (speedKph < 10) return false;
+        if (throttlePercent != null && closedThrottlePercent != null) {
+          return throttlePercent <= closedThrottlePercent + 1.5;
+        }
+        if (!isDiesel && mapKpa != null && mapKpa > 0) {
+          final baro = baroKpa != null && baroKpa > 0 ? baroKpa : 101.3;
+          return mapKpa < 0.7 * baro;
+        }
+        return rpm >= fuelCutMinRpm;
+    }
     if (rpm < fuelCutMinRpm || speedKph < 10) return false;
     if (throttlePercent != null && closedThrottlePercent != null) {
       return throttlePercent <= closedThrottlePercent + 1.5;

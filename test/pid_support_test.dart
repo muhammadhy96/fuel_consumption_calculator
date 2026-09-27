@@ -212,8 +212,8 @@ void main() {
 
     test('keeps only supported PIDs and preserves pollPidKeys ordering', () {
       final support = PidSupport()..parseRawResponse('4100BE3EB813');
-      // pollPidKeys order is 0C 0D 0B 10 04 0F 05 44 06 07 11 42 2F; the mask
-      // above supports 0C 0D 0B 04 0F 05 06 07 11 and not 10 44 42 2F.
+      // pollPidKeys order is 0C 0D 0B 10 04 0F 05 44 06 07 03 11 42 2F; the
+      // mask above supports 0C 0D 0B 04 0F 05 06 07 03 11 and not 10 44 42 2F.
       expect(support.filter(pollPidKeys), [
         '010C',
         '010D',
@@ -223,6 +223,7 @@ void main() {
         '0105',
         '0106',
         '0107',
+        '0103',
         '0111',
       ]);
     });
@@ -279,12 +280,12 @@ void main() {
   group('buildBulkCommands', () {
     final support = PidSupport();
 
-    test('packs the 13 poll PIDs into three commands, chunked at 6', () {
+    test('packs the 14 poll PIDs into three commands, chunked at 6', () {
       expect(maxPidsPerBulkRequest, 6);
       expect(support.buildBulkCommands(pollPidKeys), [
         '01 0C 0D 0B 10 04 0F',
-        '01 05 44 06 07 11 42',
-        '01 2F',
+        '01 05 44 06 07 03 11',
+        '01 42 2F',
       ]);
     });
 
@@ -345,6 +346,7 @@ void main() {
         '01 44',
         '01 06',
         '01 07',
+        '01 03',
         '01 11',
         '01 42',
         '01 2F',

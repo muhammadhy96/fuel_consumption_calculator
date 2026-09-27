@@ -11,6 +11,7 @@ class TripSample {
     required this.equivRatio,
     this.stftPercent = 0,
     this.ltftPercent = 0,
+    this.fuelSystemStatus = 0,
   });
 
   final double timeSeconds;
@@ -25,6 +26,9 @@ class TripSample {
   final double stftPercent;
   final double ltftPercent;
 
+  /// Raw PID 0103 bank-1 byte; 0 when unsupported or not yet read.
+  final int fuelSystemStatus;
+
   List<dynamic> toCsvRow() => [
         timeSeconds,
         rpm,
@@ -37,11 +41,13 @@ class TripSample {
         equivRatio,
         stftPercent,
         ltftPercent,
+        fuelSystemStatus,
       ];
 
   factory TripSample.fromCsvRow(List<dynamic> row) {
     final hasExtended = row.length >= 9;
     final hasTrims = row.length >= 11;
+    final hasFuelStatus = row.length >= 12;
     final hasSpeed = row.length >= 6;
     final double speed = hasSpeed ? (row[3] as num).toDouble() : 0.0;
     final iatIndex = hasSpeed ? 4 : 3;
@@ -58,6 +64,7 @@ class TripSample {
       equivRatio: hasExtended ? (row[8] as num).toDouble() : 1.0,
       stftPercent: hasTrims ? (row[9] as num).toDouble() : 0.0,
       ltftPercent: hasTrims ? (row[10] as num).toDouble() : 0.0,
+      fuelSystemStatus: hasFuelStatus ? (row[11] as num).toInt() : 0,
     );
   }
 }
