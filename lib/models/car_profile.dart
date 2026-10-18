@@ -5,7 +5,6 @@ class CarProfile {
     required this.fuelType,
     this.engineDisplacement,
     this.notes,
-    this.volumetricEfficiency = 85,
     this.fuelPricePerLiter = 0,
     this.nonFuelCostPerKm = 0,
     this.driverWagePerHour = 0,
@@ -17,7 +16,6 @@ class CarProfile {
   final String name;
   final String fuelType;
   final double? engineDisplacement;
-  final double volumetricEfficiency;
   final double fuelPricePerLiter;
 
   /// k_m of the trip cost model (eq. 3-34): depreciation, maintenance, oil,
@@ -44,7 +42,6 @@ class CarProfile {
     String? name,
     String? fuelType,
     double? engineDisplacement,
-    double? volumetricEfficiency,
     double? fuelPricePerLiter,
     double? nonFuelCostPerKm,
     double? driverWagePerHour,
@@ -55,7 +52,6 @@ class CarProfile {
       name: name ?? this.name,
       fuelType: fuelType ?? this.fuelType,
       engineDisplacement: engineDisplacement ?? this.engineDisplacement,
-      volumetricEfficiency: volumetricEfficiency ?? this.volumetricEfficiency,
       fuelPricePerLiter: fuelPricePerLiter ?? this.fuelPricePerLiter,
       nonFuelCostPerKm: nonFuelCostPerKm ?? this.nonFuelCostPerKm,
       driverWagePerHour: driverWagePerHour ?? this.driverWagePerHour,
@@ -70,7 +66,6 @@ class CarProfile {
       'name': name,
       'fuelType': fuelType,
       'engineDisplacement': engineDisplacement,
-      'volumetricEfficiency': volumetricEfficiency,
       'fuelPricePerLiter': fuelPricePerLiter,
       'nonFuelCostPerKm': nonFuelCostPerKm,
       'driverWagePerHour': driverWagePerHour,
@@ -85,8 +80,6 @@ class CarProfile {
       name: map['name'] as String? ?? '',
       fuelType: map['fuelType'] as String? ?? 'Petrol',
       engineDisplacement: (map['engineDisplacement'] as num?)?.toDouble(),
-      volumetricEfficiency:
-          (map['volumetricEfficiency'] as num?)?.toDouble() ?? 85,
       fuelPricePerLiter:
           (map['fuelPricePerLiter'] as num?)?.toDouble() ?? 0,
       // Absent from profiles saved before the full cost model.

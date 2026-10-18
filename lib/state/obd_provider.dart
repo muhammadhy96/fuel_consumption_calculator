@@ -226,7 +226,6 @@ class ObdProvider extends ChangeNotifier {
   }
 
   double calculateFuelFlow({
-    required double volumetricEfficiency,
     required double engineDisplacementLiters,
     required String fuelType,
   }) {
@@ -259,7 +258,6 @@ class ObdProvider extends ChangeNotifier {
       rpm,
       mapKpa,
       iat,
-      volumetricEfficiency: volumetricEfficiency,
       engineDisplacementLiters: engineDisplacementLiters,
       fuelType: fuelType,
       equivRatio: lambda ?? 1.0,

@@ -418,7 +418,6 @@ class _DrivePageState extends State<DrivePage> {
     // never happened; the trip integrator bridges or skips the gap instead.
     if (!obd.telemetryFresh) return;
     final rawFuel = obd.calculateFuelFlow(
-      volumetricEfficiency: profile.volumetricEfficiency,
       engineDisplacementLiters: profile.effectiveDisplacementLiters,
       fuelType: profile.fuelType,
     );

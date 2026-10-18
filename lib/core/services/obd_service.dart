@@ -667,6 +667,9 @@ class ObdService {
   /// Calculates instantaneous fuel flow (mL/s) from MAF, or from RPM + MAP +
   /// IAT via speed-density when MAF is not available.
   ///
+  /// Speed-density assumes a fixed [volumetricEfficiency] (%), since no PID
+  /// reports it.
+  ///
   /// The ECU's closed-loop fuel trims ([stftPercent] + [ltftPercent]) scale
   /// the open-loop fuel mass, following Applied Sciences 16, 5879:
   ///   m_fuel = (m_air / AFR) * (1 + (STFT + LTFT) / 100)
@@ -674,8 +677,8 @@ class ObdService {
     double rpm,
     double mapKpa,
     double iatKelvin, {
-    required double volumetricEfficiency,
     required double engineDisplacementLiters,
+    double volumetricEfficiency = defaultVolumetricEfficiency,
     String fuelType = 'Petrol',
     double equivRatio = 1.0,
     double? mafGramsPerSec,
@@ -702,6 +705,9 @@ class ObdService {
         gramsOfAir / actualAfr * fuelTrimFactor(stftPercent, ltftPercent);
     return (gramsOfFuel / densityGramsPerLiter) * 1000;
   }
+
+  /// Volumetric efficiency (%) assumed by speed-density.
+  static const double defaultVolumetricEfficiency = 85;
 
   /// Air mass flow (g/s) implied by PID 0143. SAE J1979 defines absolute load
   /// as air mass per intake stroke / (1.184 g/L * cylinder displacement), and

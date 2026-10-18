@@ -64,13 +64,6 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
     return null;
   }
 
-  static String? _validateVe(String? text) {
-    final value = _parseNumber(text);
-    if (value == null) return 'Enter a percentage, e.g. 85';
-    if (value < 30 || value > 120) return 'Between 30 and 120 %';
-    return null;
-  }
-
   static String? _validatePrice(String? text) {
     if ((text ?? '').trim().isEmpty) return null;
     final value = _parseNumber(text);
@@ -95,7 +88,6 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
   late final TextEditingController _nameCtrl;
   late final TextEditingController _displacementCtrl;
   late final TextEditingController _notesCtrl;
-  late final TextEditingController _veCtrl;
   late final TextEditingController _priceCtrl;
   late final TextEditingController _nonFuelCostCtrl;
   late final TextEditingController _wageCtrl;
@@ -110,9 +102,6 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
       text: profile?.engineDisplacement?.toString() ?? '',
     );
     _notesCtrl = TextEditingController(text: profile?.notes ?? '');
-    _veCtrl = TextEditingController(
-      text: profile?.volumetricEfficiency.toString() ?? '85',
-    );
     _priceCtrl = TextEditingController(
       text: _rateText(profile?.fuelPricePerLiter),
     );
@@ -134,7 +123,6 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
     _nameCtrl.dispose();
     _displacementCtrl.dispose();
     _notesCtrl.dispose();
-    _veCtrl.dispose();
     _priceCtrl.dispose();
     _nonFuelCostCtrl.dispose();
     _wageCtrl.dispose();
@@ -143,9 +131,8 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
 
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
-    // All three passed validation, so they parse.
+    // Displacement passed validation, so it parses.
     final displacement = _parseNumber(_displacementCtrl.text)!;
-    final ve = _parseNumber(_veCtrl.text)!;
     final price = _parseNumber(_priceCtrl.text) ?? 0;
     final nonFuelCost = _parseNumber(_nonFuelCostCtrl.text) ?? 0;
     final wage = _parseNumber(_wageCtrl.text) ?? 0;
@@ -161,7 +148,6 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
         name: _nameCtrl.text.trim(),
         fuelType: _fuelType,
         engineDisplacement: displacement,
-        volumetricEfficiency: ve,
         fuelPricePerLiter: price,
         nonFuelCostPerKm: nonFuelCost,
         driverWagePerHour: wage,
@@ -172,7 +158,6 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
         name: _nameCtrl.text.trim(),
         fuelType: _fuelType,
         engineDisplacement: displacement,
-        volumetricEfficiency: ve,
         fuelPricePerLiter: price,
         nonFuelCostPerKm: nonFuelCost,
         driverWagePerHour: wage,
@@ -245,38 +230,17 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
                 },
               ),
               const SizedBox(height: 14),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextFormField(
-                      controller: _displacementCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Displacement (L)',
-                        prefixIcon: Icon(Icons.settings),
-                      ),
-                      keyboardType:
-                          const TextInputType.numberWithOptions(decimal: true),
-                      inputFormatters: _decimalInput,
-                      validator: _validateDisplacement,
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: TextFormField(
-                      controller: _veCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Vol. Efficiency %',
-                        prefixIcon: Icon(Icons.speed),
-                      ),
-                      keyboardType:
-                          const TextInputType.numberWithOptions(decimal: true),
-                      inputFormatters: _decimalInput,
-                      validator: _validateVe,
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                  ),
-                ],
+              TextFormField(
+                controller: _displacementCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Displacement (L)',
+                  prefixIcon: Icon(Icons.settings),
+                ),
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                inputFormatters: _decimalInput,
+                validator: _validateDisplacement,
+                style: const TextStyle(color: Colors.white),
               ),
               const SizedBox(height: 14),
               TextFormField(
