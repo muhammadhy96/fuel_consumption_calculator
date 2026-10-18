@@ -120,6 +120,11 @@ class _ObdDiagnostics extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         _DiagRow(
+          label: 'Reply count',
+          value: obd.responseCountActive ? 'On' : 'Off',
+        ),
+        const SizedBox(height: 8),
+        _DiagRow(
           label: 'Cycle time',
           value: cycleMillis == 0 ? '--' : '$cycleMillis ms',
         ),

@@ -212,19 +212,19 @@ void main() {
 
     test('keeps only supported PIDs and preserves pollPidKeys ordering', () {
       final support = PidSupport()..parseRawResponse('4100BE3EB813');
-      // pollPidKeys order is 0C 0D 0B 10 0F 05 44 06 07 03 11 42 43 33 2F;
+      // pollPidKeys order is 0C 10 43 44 06 07 0B 0F 0D 03 11 05 42 33 2F;
       // the mask above supports 0C 0D 0B 0F 05 06 07 03 11 and none of
-      // 10 44 42 43 33 2F.
+      // 10 43 44 42 33 2F.
       expect(support.filter(pollPidKeys), [
         '010C',
-        '010D',
-        '010B',
-        '010F',
-        '0105',
         '0106',
         '0107',
+        '010B',
+        '010F',
+        '010D',
         '0103',
         '0111',
+        '0105',
       ]);
     });
 
@@ -283,9 +283,9 @@ void main() {
     test('packs the 15 poll PIDs into three commands, chunked at 6', () {
       expect(maxPidsPerBulkRequest, 6);
       expect(support.buildBulkCommands(pollPidKeys), [
-        '01 0C 0D 0B 10 0F 05',
-        '01 44 06 07 03 11 42',
-        '01 43 33 2F',
+        '01 0C 10 43 44 06 07',
+        '01 0B 0F 0D 03 11 05',
+        '01 42 33 2F',
       ]);
     });
 
@@ -331,24 +331,53 @@ void main() {
     });
   });
 
+  group('response count', () {
+    test('a reply of up to 7 bytes fits one CAN frame', () {
+      // 41 0C A B = 4 bytes; 41 0C A B 0D A = 6 bytes.
+      expect(PidSupport.expectedReplyFrames(const ['010C']), 1);
+      expect(PidSupport.expectedReplyFrames(const ['010C', '010D']), 1);
+    });
+
+    test('longer replies take an ISO-TP first frame plus 7-byte frames', () {
+      // 41 + 0C AB + 43 AB + 44 AB + 06 A + 07 A + 0B A = 16 bytes:
+      // first frame 6, then 7 + 3 -> 3 frames.
+      expect(
+        PidSupport.expectedReplyFrames(
+          const ['010C', '0143', '0144', '0106', '0107', '010B'],
+        ),
+        3,
+      );
+      // 8 bytes -> 6 + 2 -> 2 frames; 13 -> 6 + 7 -> 2; 14 -> 3.
+      expect(
+          PidSupport.expectedReplyFrames(const ['010C', '010D', '010B']), 2);
+    });
+
+    test('the count is appended as one hex digit', () {
+      expect(PidSupport.withResponseCount('01 0C 0D', 1), '01 0C 0D 1');
+      expect(PidSupport.withResponseCount('01 0C', 12), '01 0C C');
+      expect(PidSupport.withResponseCount('01 0C', 40), '01 0C F');
+      expect(PidSupport.withResponseCount('01 0C', 0), '01 0C 1');
+    });
+  });
+
   group('buildSingleCommands', () {
     final support = PidSupport();
 
     test('emits one command per PID', () {
       expect(support.buildSingleCommands(pollPidKeys), [
         '01 0C',
-        '01 0D',
-        '01 0B',
         '01 10',
-        '01 0F',
-        '01 05',
+        '01 43',
         '01 44',
         '01 06',
         '01 07',
+        '01 0B',
+        '01 0F',
+        '01 0D',
         '01 03',
         '01 11',
+        '01 05',
         '01 42',
-        '01 43',
         '01 33',
         '01 2F',
       ]);
@@ -400,6 +429,39 @@ void main() {
     test('calculated engine load is decoded but no longer polled', () {
       expect(pollPidKeys, isNot(contains('0104')));
       expect(pidByteLength.containsKey('0104'), isTrue);
+    });
+
+    test('the poll list is the fast tier followed by the slow tier', () {
+      expect(pollPidKeys, [...fastPollPidKeys, ...slowPollPidKeys]);
+      expect(fastPollPidKeys.toSet().intersection(slowPollPidKeys.toSet()),
+          isEmpty);
+    });
+
+    test('every fuel-model input is in the fast tier', () {
+      for (final pid in const [
+        '010C', '0110', '0143', '0144', '0106', '0107', //
+        '010B', '010F', '010D', '0103', '0111',
+      ]) {
+        expect(fastPollPidKeys, contains(pid), reason: pid);
+      }
+    });
+
+    test('a speed-density car gets all its fuel inputs in one request', () {
+      // 41 00 BE 3E B8 13: no MAF, no absolute load, no lambda.
+      final support = PidSupport()..parseRawResponse('4100BE3EB813');
+      final first = support.buildBulkCommands(support.filter(fastPollPidKeys));
+      // RPM, STFT, LTFT, MAP, IAT (+ speed) from one ECU reply.
+      expect(first.first, '01 0C 06 07 0B 0F 0D');
+    });
+
+    test('an absolute-load car gets all its fuel inputs in one request', () {
+      // Like the KIA: no MAF, but absolute load and lambda.
+      final support = PidSupport()
+        ..parseRange(0x00, [0x3E, 0x3E, 0xB8, 0x13])
+        ..parseRange(0x40, [0x30, 0x00, 0x00, 0x00]); // 0x43, 0x44
+      final first = support.buildBulkCommands(support.filter(fastPollPidKeys));
+      // RPM, absolute load, lambda, STFT, LTFT, MAP.
+      expect(first.first, '01 0C 43 44 06 07 0B');
     });
 
     test('only RPM, speed and MAP bypass the support bitmask', () {

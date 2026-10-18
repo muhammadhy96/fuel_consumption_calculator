@@ -108,6 +108,24 @@ class PidSupport {
     return commands;
   }
 
+  /// CAN frames in the ECU's reply to a mode-01 request for [pids]. The reply
+  /// is 0x41 plus each PID echo and its data bytes; a single frame carries 7
+  /// bytes, an ISO-TP first frame 6 and each consecutive frame 7.
+  static int expectedReplyFrames(List<String> pids) {
+    var bytes = 1;
+    for (final pid in pids) {
+      bytes += 1 + (pidByteLength[pid.toUpperCase()] ?? 4);
+    }
+    if (bytes <= 7) return 1;
+    return 1 + (bytes - 6 + 6) ~/ 7;
+  }
+
+  /// [command] with the ELM327 response-count digit appended, which lets the
+  /// adapter return as soon as that many replies arrived instead of waiting
+  /// out its timeout, e.g. `01 0C 0D` with 1 -> `01 0C 0D 1`.
+  static String withResponseCount(String command, int count) =>
+      '$command ${count.clamp(1, 15).toRadixString(16).toUpperCase()}';
+
   /// One command per PID, for adapters that reject multi-PID requests.
   /// e.g. `['010C']` -> `['01 0C']`.
   List<String> buildSingleCommands(List<String> pids) {

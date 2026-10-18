@@ -48,14 +48,23 @@ const Map<String, String> pidUnits = {
   '0143': '%',
 };
 
+/// PIDs polled every cycle: the inputs of the fuel estimate and of the
+/// overrun fuel-cut test. Ordered so the air-mass and mixture inputs (RPM,
+/// MAF or absolute load, lambda, fuel trims) share the first bulk request and
+/// so come from one ECU reply, with no skew between them.
+const List<String> fastPollPidKeys = [
+  '010C', '0110', '0143', '0144', '0106', '0107',
+  '010B', '010F', '010D', '0103', '0111',
+];
+
+/// Slow-changing PIDs, polled about once a second rather than every cycle.
+/// 0133 feeds the barometric reference of the overrun fuel-cut test.
+const List<String> slowPollPidKeys = ['0105', '0142', '0133', '012F'];
+
 /// Canonical poll PID keys, in priority order. Keys match [pidByteLength].
 ///
 /// 0104 (calculated load) is decoded but not polled: no fuel source uses it.
-/// 0133 feeds the barometric reference of the overrun fuel-cut test.
-const List<String> pollPidKeys = [
-  '010C', '010D', '010B', '0110', '010F', '0105', '0144',
-  '0106', '0107', '0103', '0111', '0142', '0143', '0133', '012F',
-];
+const List<String> pollPidKeys = [...fastPollPidKeys, ...slowPollPidKeys];
 
 /// PIDs that must survive supported-PID filtering even if the ECU's bitmask
 /// omits them — losing these would break fuel math entirely. MAF is left to

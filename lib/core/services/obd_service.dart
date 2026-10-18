@@ -20,8 +20,12 @@ import 'storage_service.dart';
 ///   * Probe the ECU's supported-PID bitmasks (01 00 / 01 20 / 01 40) and
 ///     poll only what the vehicle actually answers.
 ///   * Each poll cycle sends bulk mode-01 requests (max 6 PIDs each)
-///     back-to-back, covering all telemetry PIDs every cycle. Adapters that
-///     reject multi-PID requests fall back to one command per PID.
+///     back-to-back. The fuel-model PIDs go out every cycle, slow-changing
+///     ones about once a second. Adapters that reject multi-PID requests fall
+///     back to one command per PID.
+///   * Where the adapter handles it correctly, each request carries the
+///     ELM327 response-count digit so the adapter answers without waiting
+///     out its timeout.
 ///   * The negotiated protocol is cached per adapter so reconnects skip
 ///     the ELM327 auto-search.
 class ObdService {
@@ -64,6 +68,19 @@ class ObdService {
   /// PID keys requested by each entry of [_pollCommands], index for index.
   List<List<String>> _pollCommandPids = const [];
 
+  /// Slow-tier requests, sent at most once per [_slowPollInterval].
+  List<String> _slowPollCommands = const [];
+  List<List<String>> _slowPollCommandPids = const [];
+  final Stopwatch _slowPollWatch = Stopwatch();
+
+  /// Response-count digit per poll command, set by [_calibrateResponseCounts].
+  /// A command without an entry is sent plain.
+  Map<String, int> _responseCounts = const {};
+
+  /// PIDs each counted command answered during calibration; a counted reply
+  /// missing any of them was cut short.
+  Map<String, Set<String>> _countedReplyPids = const {};
+
   static const ObdFrameDecoder _decoder = ObdFrameDecoder();
 
   static const int _maxTransientPollErrors = 3;
@@ -72,6 +89,7 @@ class ObdService {
   static const Duration _commandTimeout = Duration(milliseconds: 600);
   static const Duration _interCycleDelay = Duration.zero;
   static const Duration _idleCycleDelay = Duration(milliseconds: 200);
+  static const Duration _slowPollInterval = Duration(seconds: 1);
   static const Duration _reconnectSettleDelay = Duration(milliseconds: 350);
   static const Duration _atTimeout = Duration(seconds: 1);
   static const Duration _resetTimeout = Duration(seconds: 5);
@@ -100,6 +118,9 @@ class ObdService {
   /// False once the adapter has rejected enough multi-PID requests that we
   /// permanently fell back to one command per PID for this session.
   bool get bulkModeActive => _bulkModeActive;
+
+  /// True while poll requests carry the ELM327 response-count digit.
+  bool get responseCountActive => _responseCounts.isNotEmpty;
 
   /// Protocol digit reported by `AT DPN` (e.g. `'6'`), or null if unknown.
   String? get activeProtocol => _activeProtocol;
@@ -239,6 +260,13 @@ class ObdService {
     _bulkFailureStreak = 0;
     _pollCommands = const [];
     _pollCommandPids = const [];
+    _slowPollCommands = const [];
+    _slowPollCommandPids = const [];
+    _slowPollWatch
+      ..stop()
+      ..reset();
+    _responseCounts = const {};
+    _countedReplyPids = const {};
     _activeProtocol = null;
 
     String? cachedProtocol;
@@ -327,9 +355,13 @@ class ObdService {
     // 9. Direct fuel rate replaces the MAF / speed-density estimate.
     _fuelRateSupported = _pidSupport.isSupported(fuelRatePidKey);
     _rebuildPollCommands();
+
+    // 10. Response counts, only where the adapter returns complete replies.
+    await _calibrateResponseCounts();
     _log(
       'init complete — protocol=${_activeProtocol ?? '?'} '
-      'pids=${_pidSupport.supportedPids.length} commands=$_pollCommands',
+      'pids=${_pidSupport.supportedPids.length} commands=$_pollCommands '
+      'slow=$_slowPollCommands counts=$_responseCounts',
     );
   }
 
@@ -372,7 +404,7 @@ class ObdService {
     final adapterSilence = Stopwatch()..start();
     while (_isPolling && _connected) {
       try {
-        if (_pollCommands.isEmpty) {
+        if (_pollCommands.isEmpty && _slowPollCommands.isEmpty) {
           await _delayWhileActive(_idleCycleDelay);
           continue;
         }
@@ -380,12 +412,31 @@ class ObdService {
         cycleWatch
           ..reset()
           ..start();
-        // Captured once: a bulk-mode fallback rebuilds both lists mid-cycle.
-        final commands = _pollCommands;
-        final commandPids = _pollCommandPids;
+        final slowDue = _slowPollCommands.isNotEmpty &&
+            (!_slowPollWatch.isRunning ||
+                _slowPollWatch.elapsed >= _slowPollInterval);
+        if (slowDue) {
+          _slowPollWatch
+            ..reset()
+            ..start();
+        }
+        // Captured once: a bulk-mode fallback rebuilds the lists mid-cycle.
+        final commands = [
+          ..._pollCommands,
+          if (slowDue) ..._slowPollCommands,
+        ];
+        final commandPids = [
+          ..._pollCommandPids,
+          if (slowDue) ..._slowPollCommandPids,
+        ];
         for (var c = 0; c < commands.length; c++) {
           final command = commands[c];
-          final response = await _sendCommand(command);
+          final count = _responseCounts[command];
+          final response = await _sendCommand(
+            count == null
+                ? command
+                : PidSupport.withResponseCount(command, count),
+          );
           if (response.isNotEmpty) adapterSilence.reset();
           if (_isNegativeResponse(response)) {
             _registerBulkFailure(command, response);
@@ -396,6 +447,7 @@ class ObdService {
             } else {
               _bulkFailureStreak = 0;
             }
+            if (count != null) _checkCountedReply(command, response);
             onDataReceived?.call(response);
           }
           if (!_isPolling || !_connected) break;
@@ -445,6 +497,69 @@ class ObdService {
     _bulkFailureStreak = 0;
     _rebuildPollCommands();
     _log('bulk multi-PID rejected — falling back to single-PID requests');
+  }
+
+  /// A counted reply missing a PID the same request answered in calibration
+  /// was cut short by the response count, so counts are dropped for the rest
+  /// of the session; the reply itself still carries valid values.
+  void _checkCountedReply(String command, String response) {
+    final expected = _countedReplyPids[command];
+    if (expected == null) return;
+    final answered = _decoder.decode(response).values.keys.toSet();
+    if (answered.containsAll(expected)) return;
+    _responseCounts = const {};
+    _countedReplyPids = const {};
+    _log('counted reply to "$command" was cut short — response counts off');
+  }
+
+  /// Finds, per poll command, a response-count digit with which the adapter
+  /// still returns the full reply. Each command is first sent plain; then
+  /// with 1 (adapters that count messages) and, if that cuts the reply
+  /// short, with the CAN frame count (adapters that count frames). Any
+  /// failure leaves every command plain, which only costs speed.
+  Future<void> _calibrateResponseCounts() async {
+    _responseCounts = const {};
+    _countedReplyPids = const {};
+    final commands = [..._pollCommands, ..._slowPollCommands];
+    final commandPids = [..._pollCommandPids, ..._slowPollCommandPids];
+    final counts = <String, int>{};
+    final expected = <String, Set<String>>{};
+    for (var i = 0; i < commands.length; i++) {
+      final command = commands[i];
+      final requested = commandPids[i].toSet();
+      final plain = _answeredPids(await _sendCommand(command), requested);
+      if (plain == null || plain.isEmpty) {
+        _log('response counts off — no clean plain reply to "$command"');
+        return;
+      }
+      int? chosen;
+      for (final count in {1, PidSupport.expectedReplyFrames(commandPids[i])}) {
+        final counted = _answeredPids(
+          await _sendCommand(PidSupport.withResponseCount(command, count)),
+          requested,
+        );
+        if (counted != null && counted.containsAll(plain)) {
+          chosen = count;
+          break;
+        }
+      }
+      if (chosen == null) {
+        _log('response counts off — "$command" cut short with every count');
+        return;
+      }
+      counts[command] = chosen;
+      expected[command] = plain;
+    }
+    _responseCounts = counts;
+    _countedReplyPids = expected;
+  }
+
+  /// PIDs decoded from a reply to a request for [requested], or null when the
+  /// reply is negative or holds a PID that was not asked for.
+  Set<String>? _answeredPids(String response, Set<String> requested) {
+    if (_isNegativeResponse(response)) return null;
+    final answered = _decoder.decode(response).values.keys.toSet();
+    return requested.containsAll(answered) ? answered : null;
   }
 
   /// True when a positive reply to a multi-PID request is missing an essential
@@ -561,6 +676,10 @@ class ObdService {
     _fuelRateSupported = false;
     _pollCommands = const [];
     _pollCommandPids = const [];
+    _slowPollCommands = const [];
+    _slowPollCommandPids = const [];
+    _responseCounts = const {};
+    _countedReplyPids = const {};
     _completePendingResponse();
     if (notify && wasConnected) {
       onDisconnected?.call();
@@ -575,23 +694,43 @@ class ObdService {
     }
   }
 
-  /// Recomputes the per-cycle command list from the supported-PID bitmask.
+  /// Recomputes the fast and slow command lists from the supported-PID
+  /// bitmask. Response counts survive only for commands that are unchanged,
+  /// since a count was calibrated for exactly that request.
   void _rebuildPollCommands() {
     final desired = _desiredPollPids();
+    final slow = slowPollPidKeys.toSet();
     final groupSize = _bulkModeActive ? maxPidsPerBulkRequest : 1;
-    final groups = <List<String>>[
-      for (var start = 0; start < desired.length; start += groupSize)
-        desired.sublist(
-          start,
-          start + groupSize < desired.length
-              ? start + groupSize
-              : desired.length,
-        ),
-    ];
-    _pollCommandPids = groups;
+    List<List<String>> groupsOf(List<String> pids) => [
+          for (var start = 0; start < pids.length; start += groupSize)
+            pids.sublist(
+              start,
+              start + groupSize < pids.length
+                  ? start + groupSize
+                  : pids.length,
+            ),
+        ];
+    _pollCommandPids =
+        groupsOf([for (final pid in desired) if (!slow.contains(pid)) pid]);
+    _slowPollCommandPids =
+        groupsOf([for (final pid in desired) if (slow.contains(pid)) pid]);
     _pollCommands = [
-      for (final group in groups) ..._pidSupport.buildBulkCommands(group),
+      for (final group in _pollCommandPids)
+        ..._pidSupport.buildBulkCommands(group),
     ];
+    _slowPollCommands = [
+      for (final group in _slowPollCommandPids)
+        ..._pidSupport.buildBulkCommands(group),
+    ];
+    final current = {..._pollCommands, ..._slowPollCommands};
+    _responseCounts = {
+      for (final entry in _responseCounts.entries)
+        if (current.contains(entry.key)) entry.key: entry.value,
+    };
+    _countedReplyPids = {
+      for (final entry in _countedReplyPids.entries)
+        if (current.contains(entry.key)) entry.key: entry.value,
+    };
   }
 
   /// [pollPidKeys] filtered by the ECU bitmask, with [essentialPidKeys] unioned

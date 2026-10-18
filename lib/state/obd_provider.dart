@@ -94,6 +94,9 @@ class ObdProvider extends ChangeNotifier {
   /// requests; false once it has fallen back to one command per PID.
   bool get bulkModeActive => _obdService.bulkModeActive;
 
+  /// True while poll requests carry the ELM327 response-count digit.
+  bool get responseCountActive => _obdService.responseCountActive;
+
   /// ELM327 protocol digit currently in use, or null when unknown.
   String? get activeProtocol => _obdService.activeProtocol;
 
