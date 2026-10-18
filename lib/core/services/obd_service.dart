@@ -152,6 +152,7 @@ class ObdService {
       } on _TransportOpenError catch (wrapped) {
         final isLastAttempt = attempt >= _maxConnectAttempts;
         if (!transport.isRetryableOpenError(wrapped.cause) || isLastAttempt) {
+          await _disconnectTransport();
           Error.throwWithStackTrace(wrapped.cause, wrapped.stackTrace);
         }
         debugPrint(
@@ -180,9 +181,11 @@ class ObdService {
     try {
       _transport = transport;
       try {
-        await transport
-            .open(onPayload: _handleTransportPayload)
-            .timeout(const Duration(seconds: 15));
+        // No outer timeout: each transport bounds its own open (Wi-Fi has a
+        // socket timeout, Bluetooth SPP fails by itself). Cutting a slow
+        // Bluetooth connect short would leak the socket that lands later and
+        // leave the adapter busy for every following attempt.
+        await transport.open(onPayload: _handleTransportPayload);
       } catch (err, stack) {
         throw _TransportOpenError(err, stack);
       }
