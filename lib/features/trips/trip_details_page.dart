@@ -133,10 +133,13 @@ class _TripDetailsPageState extends State<TripDetailsPage> {
                         '${trip.avgFuelMlPerSec.toStringAsFixed(2)} mL/s'),
                 if (trip.totalCost != null) ...[
                   _StatCell(
-                      label: trip.costIsFullModel
-                          ? 'Trip cost'
-                          : 'Fuel cost only',
-                      value: formatCost(trip.totalCost!)),
+                      label: 'Fuel cost', value: formatCost(trip.fuelCost!)),
+                  // C_trip needs k_m and k_t; without them it is unknown.
+                  _StatCell(
+                      label: 'Trip cost',
+                      value: trip.costIsFullModel
+                          ? formatCost(trip.totalCost!)
+                          : '--'),
                   _StatCell(
                       label: trip.costIsFullModel
                           ? 'Cost / km'

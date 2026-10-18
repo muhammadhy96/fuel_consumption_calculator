@@ -58,9 +58,11 @@ class TripSummaryPage extends StatelessWidget {
                   '${trip.avgFuelMlPerSec.toStringAsFixed(2)} mL/s',
                 ),
                 if (trip.totalCost != null) ...[
+                  _StatEntry('Fuel cost', formatCost(trip.fuelCost!)),
+                  // C_trip needs k_m and k_t; without them it is unknown.
                   _StatEntry(
-                    trip.costIsFullModel ? 'Trip cost' : 'Fuel cost only',
-                    formatCost(trip.totalCost!),
+                    'Trip cost',
+                    trip.costIsFullModel ? formatCost(trip.totalCost!) : '--',
                   ),
                   _StatEntry(
                     trip.costIsFullModel ? 'Cost / km' : 'Fuel cost / km',

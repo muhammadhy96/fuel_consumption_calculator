@@ -130,6 +130,7 @@ void main() {
       expect(trip.fuelCostShare, isNull);
       expect(trip.costIsFullModel, isFalse);
       expect(trip.fuelPricePerLiter, 0);
+      expect(trip.fuelCost, isNull);
     });
 
     test('round-trips through toMap', () {
@@ -156,6 +157,8 @@ void main() {
       expect(restored.nonFuelCostPerKm, 50);
       expect(restored.driverWagePerHour, 1000);
       expect(restored.costIsFullModel, isTrue);
+      // 5 L at 185 per litre.
+      expect(restored.fuelCost, 925);
     });
   });
 }

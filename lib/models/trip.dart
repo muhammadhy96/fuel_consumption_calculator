@@ -57,6 +57,10 @@ class Trip {
 
   double get totalFuelLiters => totalFuelMl / 1000;
 
+  /// V_f × P_fuel, the price of the litres burned. Null when [totalCost] is.
+  double? get fuelCost =>
+      totalCost != null ? totalFuelLiters * fuelPricePerLiter : null;
+
   Map<String, dynamic> toMap() {
     return {
       'id': id,

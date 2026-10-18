@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import '../../core/theme/app_theme.dart';
 import '../../models/trip_sample.dart';
 
-/// Trip replay chart showing fuel flow (L/h) over the trip duration.
+/// Trip replay chart showing fuel flow (mL/s) over the trip duration.
 class TripChart extends StatelessWidget {
   const TripChart({super.key, required this.samples});
 
@@ -22,7 +22,7 @@ class TripChart extends StatelessWidget {
     }
 
     final fuelSpots = <FlSpot>[
-      for (final s in samples) FlSpot(s.timeSeconds, s.fuelMlPerSec * 3.6),
+      for (final s in samples) FlSpot(s.timeSeconds, s.fuelMlPerSec),
     ];
 
     final maxX = fuelSpots.last.x;
@@ -87,13 +87,13 @@ class TripChart extends StatelessWidget {
           ),
           leftTitles: AxisTitles(
             axisNameSize: 18,
-            axisNameWidget: Text('Fuel flow (L/h)', style: axisStyle),
+            axisNameWidget: Text('Fuel flow (mL/s)', style: axisStyle),
             sideTitles: SideTitles(
               showTitles: true,
               interval: yInterval,
               reservedSize: 34,
               getTitlesWidget: (value, meta) => Text(
-                value.toStringAsFixed(maxY < 10 ? 1 : 0),
+                value.toStringAsFixed(maxY < 1 ? 2 : 1),
                 style: axisStyle,
               ),
             ),
