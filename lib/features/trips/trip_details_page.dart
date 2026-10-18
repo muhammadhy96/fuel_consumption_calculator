@@ -131,6 +131,22 @@ class _TripDetailsPageState extends State<TripDetailsPage> {
                     label: 'Avg flow',
                     value:
                         '${trip.avgFuelMlPerSec.toStringAsFixed(2)} mL/s'),
+                if (trip.totalCost != null) ...[
+                  _StatCell(
+                      label: trip.costIsFullModel
+                          ? 'Trip cost'
+                          : 'Fuel cost only',
+                      value: formatCost(trip.totalCost!)),
+                  _StatCell(
+                      label: trip.costIsFullModel
+                          ? 'Cost / km'
+                          : 'Fuel cost / km',
+                      value: formatCostPerKm(trip.costPerKm)),
+                  if (trip.costIsFullModel)
+                    _StatCell(
+                        label: 'Fuel share',
+                        value: formatShare(trip.fuelCostShare)),
+                ],
               ],
             ),
             const SizedBox(height: 16),

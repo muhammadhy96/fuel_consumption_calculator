@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/formatters.dart';
+import '../../core/utils/trip_cost.dart';
 import '../../models/car_profile.dart';
 import '../../state/obd_provider.dart';
 import '../../state/trip_provider.dart';
@@ -52,7 +53,7 @@ class LiveTripStats {
     required this.distanceKm,
     required this.avgConsumptionLPer100km,
     required this.instantConsumptionLPer100km,
-    required this.costEstimate,
+    required this.cost,
     required this.elapsedSeconds,
     required this.ecoScore,
   });
@@ -61,7 +62,8 @@ class LiveTripStats {
   final double distanceKm;
   final double avgConsumptionLPer100km;
   final double instantConsumptionLPer100km;
-  final double costEstimate;
+  /// Eq. 3-34 on the running totals; null when the profile has no fuel price.
+  final TripCost? cost;
   final int elapsedSeconds;
   final int ecoScore;
 
@@ -70,7 +72,7 @@ class LiveTripStats {
     distanceKm: 0,
     avgConsumptionLPer100km: 0,
     instantConsumptionLPer100km: 0,
-    costEstimate: 0,
+    cost: null,
     elapsedSeconds: 0,
     ecoScore: 0,
   );
@@ -459,7 +461,7 @@ class _MetricGrid extends StatelessWidget {
               double coolantKelvin,
               double throttlePercent,
               double batteryVolts,
-              double? engineLoadPercent,
+              double? absoluteLoadPercent,
               double? fuelTankPercent,
             })>(
           selector: (_, obd) => (
@@ -470,7 +472,7 @@ class _MetricGrid extends StatelessWidget {
             coolantKelvin: obd.coolantKelvin,
             throttlePercent: obd.throttlePercent,
             batteryVolts: obd.batteryVolts,
-            engineLoadPercent: obd.engineLoadPercent,
+            absoluteLoadPercent: obd.absoluteLoadPercent,
             fuelTankPercent: obd.fuelTankPercent,
           ),
           builder: (context, s, _) {
@@ -492,13 +494,13 @@ class _MetricGrid extends StatelessWidget {
                 accent: AppTheme.accentLime,
               ),
               MetricTile(
-                label: 'Load',
-                value: s.engineLoadPercent != null
-                    ? s.engineLoadPercent!.toStringAsFixed(0)
+                label: 'Abs Load',
+                value: s.absoluteLoadPercent != null
+                    ? s.absoluteLoadPercent!.toStringAsFixed(0)
                     : '--',
                 unit: '%',
-                icon: Icons.speed,
-                accent: AppTheme.accentAmber,
+                icon: Icons.equalizer,
+                accent: AppTheme.accentViolet,
               ),
               MetricTile(
                 label: 'Intake',
@@ -575,6 +577,9 @@ class _TripStatsCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cost = tripStats.cost;
+    // Without k_m and k_t only the fuel term is known, and says so.
+    final fullModel = cost?.isFullModel ?? false;
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -631,15 +636,48 @@ class _TripStatsCard extends StatelessWidget {
               ),
               Expanded(
                 child: _TripStatCell(
-                  label: 'Est. cost',
-                  value: tripStats.costEstimate > 0
-                      ? tripStats.costEstimate.toStringAsFixed(2)
-                      : '--',
-                  unit: '\$',
+                  label: fullModel ? 'Trip cost' : 'Fuel cost',
+                  value: cost != null ? formatCost(cost.total) : '--',
+                  unit: '',
                 ),
               ),
             ],
           ),
+          if (cost != null) ...[
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: _TripStatCell(
+                    label: fullModel ? 'Cost / km' : 'Fuel cost / km',
+                    value: cost.costPerKm != null
+                        ? formatCost(cost.costPerKm!)
+                        : '--',
+                    unit: '/km',
+                  ),
+                ),
+                Expanded(
+                  flex: 2,
+                  child: fullModel
+                      ? _TripStatCell(
+                          label: 'Fuel share',
+                          value: cost.fuelShare != null
+                              ? (cost.fuelShare! * 100).toStringAsFixed(0)
+                              : '--',
+                          unit: '%',
+                        )
+                      : Text(
+                          'Fuel cost only. Set non-fuel cost per km and '
+                          'driver wage on the profile for the full trip cost.',
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.55),
+                            fontSize: 11,
+                          ),
+                        ),
+                ),
+              ],
+            ),
+          ],
         ],
       ),
     );

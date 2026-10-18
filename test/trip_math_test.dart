@@ -83,28 +83,26 @@ class FakeStorageService extends StorageService {
 }
 
 CarProfile buildProfile({String id = 'profile-1'}) => CarProfile(
-      id: id,
-      name: 'Test Car',
-      fuelType: 'Petrol',
-      engineDisplacement: 1.6,
-    );
+  id: id,
+  name: 'Test Car',
+  fuelType: 'Petrol',
+  engineDisplacement: 1.6,
+);
 
 TripSample sample(
   double timeSeconds, {
   double fuelMlPerSec = 0,
   double speedKph = 0,
-}) =>
-    TripSample(
-      timeSeconds: timeSeconds,
-      rpm: 0,
-      mapKpa: 0,
-      speedKph: speedKph,
-      iatKelvin: 293.15,
-      fuelMlPerSec: fuelMlPerSec,
-      engineLoadPercent: 0,
-      mafGramsPerSec: 0,
-      equivRatio: 1,
-    );
+}) => TripSample(
+  timeSeconds: timeSeconds,
+  rpm: 0,
+  mapKpa: 0,
+  speedKph: speedKph,
+  iatKelvin: 293.15,
+  fuelMlPerSec: fuelMlPerSec,
+  mafGramsPerSec: 0,
+  equivRatio: 1,
+);
 
 void main() {
   late FakeFileService files;
@@ -122,60 +120,61 @@ void main() {
   });
 
   group('trapezoidal integration', () {
-    test('fuel, distance and average consumption over a four-sample trip',
-        () async {
-      provider.startTrip(buildProfile());
-      // t   fuel mL/s   speed km/h
-      // 0       0            0
-      // 1       2           36
-      // 2       4           72
-      // 3       4           72
-      provider
-        ..addSample(sample(0, fuelMlPerSec: 0, speedKph: 0))
-        ..addSample(sample(1, fuelMlPerSec: 2, speedKph: 36))
-        ..addSample(sample(2, fuelMlPerSec: 4, speedKph: 72))
-        ..addSample(sample(3, fuelMlPerSec: 4, speedKph: 72));
+    test(
+      'fuel, distance and average consumption over a four-sample trip',
+      () async {
+        provider.startTrip(buildProfile());
+        // t   fuel mL/s   speed km/h
+        // 0       0            0
+        // 1       2           36
+        // 2       4           72
+        // 3       4           72
+        provider
+          ..addSample(sample(0, fuelMlPerSec: 0, speedKph: 0))
+          ..addSample(sample(1, fuelMlPerSec: 2, speedKph: 36))
+          ..addSample(sample(2, fuelMlPerSec: 4, speedKph: 72))
+          ..addSample(sample(3, fuelMlPerSec: 4, speedKph: 72));
 
-      final trip = await provider.stopTrip();
+        final trip = await provider.stopTrip();
 
-      // fuel: (0+2)/2*1 + (2+4)/2*1 + (4+4)/2*1 = 1 + 3 + 4 = 8 mL
-      expect(trip!.totalFuelMl, closeTo(8.0, 1e-12));
-      // distance: (0+36)/2*1/3600 + (36+72)/2*1/3600 + (72+72)/2*1/3600
-      //         = 18/3600 + 54/3600 + 72/3600 = 0.005 + 0.015 + 0.02 = 0.04 km
-      expect(trip.distanceKm, closeTo(0.04, 1e-12));
-      // duration comes from the last sample's timestamp: 3 s
-      expect(trip.durationSeconds, 3);
-      // average rate: 8 mL / 3 s
-      expect(trip.avgFuelMlPerSec, closeTo(8 / 3, 1e-12));
-      // consumption: (8 mL / 1000) / 0.04 km * 100 = 0.008/0.04*100 = 20
-      expect(trip.avgConsumptionLPer100Km, closeTo(20.0, 1e-12));
-    });
+        // fuel: (0+2)/2*1 + (2+4)/2*1 + (4+4)/2*1 = 1 + 3 + 4 = 8 mL
+        expect(trip!.totalFuelMl, closeTo(8.0, 1e-12));
+        // distance: (0+36)/2*1/3600 + (36+72)/2*1/3600 + (72+72)/2*1/3600
+        //         = 18/3600 + 54/3600 + 72/3600 = 0.005 + 0.015 + 0.02 = 0.04 km
+        expect(trip.distanceKm, closeTo(0.04, 1e-12));
+        // duration comes from the last sample's timestamp: 3 s
+        expect(trip.durationSeconds, 3);
+        // average rate: 8 mL / 3 s
+        expect(trip.avgFuelMlPerSec, closeTo(8 / 3, 1e-12));
+        // consumption: (8 mL / 1000) / 0.04 km * 100 = 0.008/0.04*100 = 20
+        expect(trip.avgConsumptionLPer100Km, closeTo(20.0, 1e-12));
+      },
+    );
 
-    test('uneven sample spacing is weighted by dt, not by sample count',
-        () async {
-      provider.startTrip(buildProfile());
-      // A 0.4 s gap then a 4 s gap: the long segment must dominate.
-      provider
-        ..addSample(sample(0, fuelMlPerSec: 1, speedKph: 0))
-        ..addSample(sample(0.4, fuelMlPerSec: 3, speedKph: 36))
-        ..addSample(sample(4.4, fuelMlPerSec: 3, speedKph: 36));
+    test(
+      'uneven sample spacing is weighted by dt, not by sample count',
+      () async {
+        provider.startTrip(buildProfile());
+        // A 0.4 s gap then a 4 s gap: the long segment must dominate.
+        provider
+          ..addSample(sample(0, fuelMlPerSec: 1, speedKph: 0))
+          ..addSample(sample(0.4, fuelMlPerSec: 3, speedKph: 36))
+          ..addSample(sample(4.4, fuelMlPerSec: 3, speedKph: 36));
 
-      final trip = await provider.stopTrip();
+        final trip = await provider.stopTrip();
 
-      // fuel: (1+3)/2*0.4 + (3+3)/2*4 = 0.8 + 12 = 12.8 mL
-      expect(trip!.totalFuelMl, closeTo(12.8, 1e-12));
-      // distance: (0+36)/2*0.4/3600 + (36+36)/2*4/3600
-      //         = 7.2/3600 + 144/3600 = 0.002 + 0.04 = 0.042 km
-      expect(trip.distanceKm, closeTo(0.042, 1e-12));
-      // duration: 4.4 s rounds to 4
-      expect(trip.durationSeconds, 4);
-      expect(trip.avgFuelMlPerSec, closeTo(12.8 / 4, 1e-12));
-      // consumption: 0.0128 L / 0.042 km * 100 = 30.476190476...
-      expect(
-        trip.avgConsumptionLPer100Km,
-        closeTo(30.476190476190474, 1e-9),
-      );
-    });
+        // fuel: (1+3)/2*0.4 + (3+3)/2*4 = 0.8 + 12 = 12.8 mL
+        expect(trip!.totalFuelMl, closeTo(12.8, 1e-12));
+        // distance: (0+36)/2*0.4/3600 + (36+36)/2*4/3600
+        //         = 7.2/3600 + 144/3600 = 0.002 + 0.04 = 0.042 km
+        expect(trip.distanceKm, closeTo(0.042, 1e-12));
+        // duration: 4.4 s rounds to 4
+        expect(trip.durationSeconds, 4);
+        expect(trip.avgFuelMlPerSec, closeTo(12.8 / 4, 1e-12));
+        // consumption: 0.0128 L / 0.042 km * 100 = 30.476190476...
+        expect(trip.avgConsumptionLPer100Km, closeTo(30.476190476190474, 1e-9));
+      },
+    );
 
     test('duplicate timestamps (dt == 0) contribute nothing', () async {
       provider.startTrip(buildProfile());
@@ -195,22 +194,24 @@ void main() {
       expect(trip.avgConsumptionLPer100Km, closeTo(36.0, 1e-9));
     });
 
-    test('a sample that goes backwards in time is skipped, not subtracted',
-        () async {
-      provider.startTrip(buildProfile());
-      provider
-        ..addSample(sample(0, fuelMlPerSec: 10, speedKph: 36))
-        ..addSample(sample(1, fuelMlPerSec: 10, speedKph: 36))
-        // Clock glitch: dt = -0.4 -> the whole segment is ignored.
-        ..addSample(sample(0.6, fuelMlPerSec: 1000, speedKph: 1000));
+    test(
+      'a sample that goes backwards in time is skipped, not subtracted',
+      () async {
+        provider.startTrip(buildProfile());
+        provider
+          ..addSample(sample(0, fuelMlPerSec: 10, speedKph: 36))
+          ..addSample(sample(1, fuelMlPerSec: 10, speedKph: 36))
+          // Clock glitch: dt = -0.4 -> the whole segment is ignored.
+          ..addSample(sample(0.6, fuelMlPerSec: 1000, speedKph: 1000));
 
-      final trip = await provider.stopTrip();
+        final trip = await provider.stopTrip();
 
-      // fuel: (10+10)/2*1 = 10 mL only
-      expect(trip!.totalFuelMl, closeTo(10.0, 1e-12));
-      // distance: (36+36)/2*1/3600 = 0.01 km only
-      expect(trip.distanceKm, closeTo(0.01, 1e-12));
-    });
+        // fuel: (10+10)/2*1 = 10 mL only
+        expect(trip!.totalFuelMl, closeTo(10.0, 1e-12));
+        // distance: (36+36)/2*1/3600 = 0.01 km only
+        expect(trip.distanceKm, closeTo(0.01, 1e-12));
+      },
+    );
 
     test('a stationary trip burns fuel but covers no distance', () async {
       provider.startTrip(buildProfile());
@@ -273,9 +274,7 @@ void main() {
       const total = 52000;
       provider.startTrip(buildProfile());
       for (var i = 0; i < total; i++) {
-        provider.addSample(
-          sample(i.toDouble(), fuelMlPerSec: 1, speedKph: 36),
-        );
+        provider.addSample(sample(i.toDouble(), fuelMlPerSec: 1, speedKph: 36));
       }
 
       expect(
@@ -307,36 +306,40 @@ void main() {
   });
 
   group('CSV handoff', () {
-    test('falls back to the bulk save when no streaming writer opened',
-        () async {
-      provider.startTrip(buildProfile());
-      provider
-        ..addSample(sample(0, fuelMlPerSec: 1))
-        ..addSample(sample(1, fuelMlPerSec: 1));
+    test(
+      'falls back to the bulk save when no streaming writer opened',
+      () async {
+        provider.startTrip(buildProfile());
+        provider
+          ..addSample(sample(0, fuelMlPerSec: 1))
+          ..addSample(sample(1, fuelMlPerSec: 1));
 
-      final trip = await provider.stopTrip();
+        final trip = await provider.stopTrip();
 
-      expect(files.openWriterCalls, 1);
-      expect(files.bulkSaveCalls, 1);
-      expect(files.lastBulkProfileId, 'profile-1');
-      expect(files.lastBulkSamples.length, 2);
-      expect(trip!.dataFilePath, files.bulkSavePath);
-    });
+        expect(files.openWriterCalls, 1);
+        expect(files.bulkSaveCalls, 1);
+        expect(files.lastBulkProfileId, 'profile-1');
+        expect(files.lastBulkSamples.length, 2);
+        expect(trip!.dataFilePath, files.bulkSavePath);
+      },
+    );
 
-    test('a failing bulk save leaves the trip intact with no CSV path',
-        () async {
-      files.bulkSaveThrows = true;
-      provider.startTrip(buildProfile());
-      provider
-        ..addSample(sample(0, fuelMlPerSec: 2))
-        ..addSample(sample(2, fuelMlPerSec: 2));
+    test(
+      'a failing bulk save leaves the trip intact with no CSV path',
+      () async {
+        files.bulkSaveThrows = true;
+        provider.startTrip(buildProfile());
+        provider
+          ..addSample(sample(0, fuelMlPerSec: 2))
+          ..addSample(sample(2, fuelMlPerSec: 2));
 
-      final trip = await provider.stopTrip();
+        final trip = await provider.stopTrip();
 
-      expect(trip, isNotNull);
-      expect(trip!.dataFilePath, isNull);
-      expect(trip.totalFuelMl, closeTo(4.0, 1e-12)); // (2+2)/2*2
-    });
+        expect(trip, isNotNull);
+        expect(trip!.dataFilePath, isNull);
+        expect(trip.totalFuelMl, closeTo(4.0, 1e-12)); // (2+2)/2*2
+      },
+    );
 
     test('activeCsvPath is null while the streaming writer is unavailable', () {
       expect(provider.activeCsvPath, isNull);
@@ -451,10 +454,10 @@ void main() {
 
       await provider.loadTrips();
 
-      expect(
-        provider.tripsForProfile('profile-1').map((t) => t.id),
-        ['new', 'old'],
-      );
+      expect(provider.tripsForProfile('profile-1').map((t) => t.id), [
+        'new',
+        'old',
+      ]);
       expect(provider.tripsForProfile('profile-2').single.id, 'other-profile');
       expect(provider.lastTrip?.id, 'new');
     });
@@ -462,10 +465,7 @@ void main() {
     test('the exposed sample list cannot be mutated by callers', () {
       provider.startTrip(buildProfile());
       provider.addSample(sample(0, fuelMlPerSec: 1));
-      expect(
-        () => provider.samples.add(sample(1)),
-        throwsUnsupportedError,
-      );
+      expect(() => provider.samples.add(sample(1)), throwsUnsupportedError);
     });
   });
 
@@ -490,12 +490,16 @@ void main() {
       provider.startTrip(buildProfile());
       provider
         ..addSample(sample(0, fuelMlPerSec: 2, speedKph: 72))
-        ..addSample(sample(TripIntegrator.maxGapSeconds,
-            fuelMlPerSec: 2, speedKph: 72));
+        ..addSample(
+          sample(TripIntegrator.maxGapSeconds, fuelMlPerSec: 2, speedKph: 72),
+        );
 
       final trip = await provider.stopTrip();
 
-      expect(trip!.totalFuelMl, closeTo(2 * TripIntegrator.maxGapSeconds, 1e-9));
+      expect(
+        trip!.totalFuelMl,
+        closeTo(2 * TripIntegrator.maxGapSeconds, 1e-9),
+      );
     });
 
     test('the running totals equal what stopTrip saves', () async {
@@ -516,22 +520,24 @@ void main() {
   });
 
   group('interrupted trips', () {
-    test('a provisional record is saved at start and replaced at stop',
-        () async {
-      provider.startTrip(buildProfile());
-      await Future<void>.delayed(Duration.zero);
-      expect(storage.trips.single.inProgress, isTrue);
-      expect(storage.trips.single.profileId, 'profile-1');
+    test(
+      'a provisional record is saved at start and replaced at stop',
+      () async {
+        provider.startTrip(buildProfile());
+        await Future<void>.delayed(Duration.zero);
+        expect(storage.trips.single.inProgress, isTrue);
+        expect(storage.trips.single.profileId, 'profile-1');
 
-      provider
-        ..addSample(sample(0, fuelMlPerSec: 1))
-        ..addSample(sample(4, fuelMlPerSec: 3));
-      final trip = await provider.stopTrip();
+        provider
+          ..addSample(sample(0, fuelMlPerSec: 1))
+          ..addSample(sample(4, fuelMlPerSec: 3));
+        final trip = await provider.stopTrip();
 
-      expect(storage.trips.single.id, trip!.id);
-      expect(storage.trips.single.inProgress, isFalse);
-      expect(storage.trips.single.totalFuelMl, closeTo(8.0, 1e-12));
-    });
+        expect(storage.trips.single.id, trip!.id);
+        expect(storage.trips.single.inProgress, isFalse);
+        expect(storage.trips.single.totalFuelMl, closeTo(8.0, 1e-12));
+      },
+    );
 
     test('a trip left in progress is rebuilt from its CSV on load', () async {
       const path = '/exports/FuelTrips/interrupted.csv';
@@ -541,17 +547,19 @@ void main() {
         sample(4.4, fuelMlPerSec: 3, speedKph: 36),
       ];
       final start = DateTime(2026, 9, 24, 10);
-      storage.trips.add(Trip(
-        id: 'trip-interrupted',
-        profileId: 'profile-1',
-        startTime: start,
-        endTime: start,
-        durationSeconds: 0,
-        totalFuelMl: 0,
-        avgFuelMlPerSec: 0,
-        dataFilePath: path,
-        inProgress: true,
-      ));
+      storage.trips.add(
+        Trip(
+          id: 'trip-interrupted',
+          profileId: 'profile-1',
+          startTime: start,
+          endTime: start,
+          durationSeconds: 0,
+          totalFuelMl: 0,
+          avgFuelMlPerSec: 0,
+          dataFilePath: path,
+          inProgress: true,
+        ),
+      );
 
       await provider.loadTrips();
 
@@ -567,16 +575,18 @@ void main() {
 
     test('an interrupted trip that recorded nothing is dropped', () async {
       final start = DateTime(2026, 9, 24, 10);
-      storage.trips.add(Trip(
-        id: 'trip-empty',
-        profileId: 'profile-1',
-        startTime: start,
-        endTime: start,
-        durationSeconds: 0,
-        totalFuelMl: 0,
-        avgFuelMlPerSec: 0,
-        inProgress: true,
-      ));
+      storage.trips.add(
+        Trip(
+          id: 'trip-empty',
+          profileId: 'profile-1',
+          startTime: start,
+          endTime: start,
+          durationSeconds: 0,
+          totalFuelMl: 0,
+          avgFuelMlPerSec: 0,
+          inProgress: true,
+        ),
+      );
 
       await provider.loadTrips();
 
@@ -584,13 +594,105 @@ void main() {
       expect(storage.trips, isEmpty);
     });
 
-    test('activeProfileId names the recording profile only while running',
-        () async {
-      expect(provider.activeProfileId, isNull);
-      provider.startTrip(buildProfile(id: 'profile-7'));
-      expect(provider.activeProfileId, 'profile-7');
-      await provider.stopTrip();
-      expect(provider.activeProfileId, isNull);
+    test(
+      'activeProfileId names the recording profile only while running',
+      () async {
+        expect(provider.activeProfileId, isNull);
+        provider.startTrip(buildProfile(id: 'profile-7'));
+        expect(provider.activeProfileId, 'profile-7');
+        await provider.stopTrip();
+        expect(provider.activeProfileId, isNull);
+      },
+    );
+  });
+
+  group('trip cost (eq. 3-34)', () {
+    // 10 s at 2 mL/s and 36 km/h: V_f = 0.02 L, S = 0.1 km, T = 10/3600 h.
+    //   C_trip = 0.02 × 185 + 0.1 × 50 + (10/3600) × 1000 = 3.7 + 5 + 2.7778
+    const fuelCost = 0.02 * 185;
+    const expectedTotal = fuelCost + 0.1 * 50 + 10 / 3600 * 1000;
+
+    CarProfile costedProfile({double kM = 50, double kT = 1000}) => CarProfile(
+      id: 'profile-1',
+      name: 'Test Car',
+      fuelType: 'Petrol',
+      fuelPricePerLiter: 185,
+      nonFuelCostPerKm: kM,
+      driverWagePerHour: kT,
+    );
+
+    void recordTenSeconds() {
+      for (var t = 0; t <= 10; t++) {
+        provider.addSample(sample(t.toDouble(), fuelMlPerSec: 2, speedKph: 36));
+      }
+    }
+
+    test('the saved trip carries C_trip, cost per km and fuel share', () async {
+      provider.startTrip(costedProfile());
+      recordTenSeconds();
+      final live = provider.liveCost!;
+
+      final trip = await provider.stopTrip();
+
+      expect(trip!.totalCost, closeTo(expectedTotal, 1e-9));
+      expect(trip.costPerKm, closeTo(expectedTotal / 0.1, 1e-6));
+      expect(trip.fuelCostShare, closeTo(fuelCost / expectedTotal, 1e-9));
+      expect(trip.costIsFullModel, isTrue);
+      // The dashboard showed the number history keeps.
+      expect(live.total, closeTo(trip.totalCost!, 1e-12));
+      expect(storage.trips.single.totalCost, trip.totalCost);
+    });
+
+    test('without a wage only the fuel cost is saved, with no share', () async {
+      provider.startTrip(costedProfile(kT: 0));
+      recordTenSeconds();
+
+      final trip = await provider.stopTrip();
+
+      expect(trip!.totalCost, closeTo(fuelCost, 1e-12));
+      expect(trip.costPerKm, closeTo(fuelCost / 0.1, 1e-9));
+      expect(trip.fuelCostShare, isNull);
+      expect(trip.costIsFullModel, isFalse);
+    });
+
+    test('a profile with no fuel price saves no cost', () async {
+      provider.startTrip(buildProfile());
+      recordTenSeconds();
+      expect(provider.liveCost, isNull);
+
+      final trip = await provider.stopTrip();
+
+      expect(trip!.totalCost, isNull);
+    });
+
+    test('a recovered trip is costed with the rates it started with', () async {
+      final start = DateTime(2026, 10, 18, 8);
+      files.csvByPath['/exports/crashed.csv'] = [
+        for (var t = 0; t <= 10; t++)
+          sample(t.toDouble(), fuelMlPerSec: 2, speedKph: 36),
+      ];
+      storage.trips.add(
+        Trip(
+          id: 'trip-crashed',
+          profileId: 'profile-1',
+          startTime: start,
+          endTime: start,
+          durationSeconds: 0,
+          totalFuelMl: 0,
+          avgFuelMlPerSec: 0,
+          dataFilePath: '/exports/crashed.csv',
+          inProgress: true,
+          fuelPricePerLiter: 185,
+          nonFuelCostPerKm: 50,
+          driverWagePerHour: 1000,
+        ),
+      );
+
+      await provider.loadTrips();
+
+      final recovered = provider.tripsForProfile('profile-1').single;
+      expect(recovered.totalCost, closeTo(expectedTotal, 1e-9));
+      expect(recovered.fuelCostShare, closeTo(fuelCost / expectedTotal, 1e-9));
     });
   });
 }

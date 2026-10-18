@@ -138,8 +138,8 @@ void main() {
     test('parses the mode/PID echo and the four mask bytes', () {
       final support = PidSupport()..parseRawResponse('4100BE3EB813');
       expect(support.supportedPids, expectedFromBe3eb813);
-      // MAF is genuinely absent from this mask — that is the whole point of the
-      // essentialPidKeys union in ObdService.
+      // MAF is genuinely absent from this mask, and it is not essential, so
+      // ObdService drops it from the poll list.
       expect(support.isSupported('0110'), isFalse);
     });
 
@@ -212,13 +212,13 @@ void main() {
 
     test('keeps only supported PIDs and preserves pollPidKeys ordering', () {
       final support = PidSupport()..parseRawResponse('4100BE3EB813');
-      // pollPidKeys order is 0C 0D 0B 10 04 0F 05 44 06 07 03 11 42 2F; the
-      // mask above supports 0C 0D 0B 04 0F 05 06 07 03 11 and not 10 44 42 2F.
+      // pollPidKeys order is 0C 0D 0B 10 0F 05 44 06 07 03 11 42 43 33 2F;
+      // the mask above supports 0C 0D 0B 0F 05 06 07 03 11 and none of
+      // 10 44 42 43 33 2F.
       expect(support.filter(pollPidKeys), [
         '010C',
         '010D',
         '010B',
-        '0104',
         '010F',
         '0105',
         '0106',
@@ -283,9 +283,9 @@ void main() {
     test('packs the 15 poll PIDs into three commands, chunked at 6', () {
       expect(maxPidsPerBulkRequest, 6);
       expect(support.buildBulkCommands(pollPidKeys), [
-        '01 0C 0D 0B 10 04 0F',
-        '01 05 44 06 07 03 11',
-        '01 42 43 2F',
+        '01 0C 0D 0B 10 0F 05',
+        '01 44 06 07 03 11 42',
+        '01 43 33 2F',
       ]);
     });
 
@@ -340,7 +340,6 @@ void main() {
         '01 0D',
         '01 0B',
         '01 10',
-        '01 04',
         '01 0F',
         '01 05',
         '01 44',
@@ -350,6 +349,7 @@ void main() {
         '01 11',
         '01 42',
         '01 43',
+        '01 33',
         '01 2F',
       ]);
     });
@@ -391,6 +391,20 @@ void main() {
 
     test('the poll list has no duplicates', () {
       expect(pollPidKeys.toSet().length, pollPidKeys.length);
+    });
+
+    test('barometric pressure is polled for the fuel-cut reference', () {
+      expect(pollPidKeys, contains('0133'));
+    });
+
+    test('calculated engine load is decoded but no longer polled', () {
+      expect(pollPidKeys, isNot(contains('0104')));
+      expect(pidByteLength.containsKey('0104'), isTrue);
+    });
+
+    test('only RPM, speed and MAP bypass the support bitmask', () {
+      // MAF reads 0 on both test cars; the bitmask decides whether to poll it.
+      expect(essentialPidKeys, {'010C', '010D', '010B'});
     });
   });
 

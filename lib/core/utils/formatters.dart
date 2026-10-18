@@ -53,3 +53,22 @@ String formatRpm(double rpm) {
   if (rpm >= 1000) return '${(rpm / 1000).toStringAsFixed(1)}k';
   return rpm.toStringAsFixed(0);
 }
+
+/// An amount in the currency of the profile's fuel price, which the app does
+/// not name.
+String formatCost(double amount) {
+  if (!amount.isFinite) return '--';
+  if (amount >= 1000) return amount.toStringAsFixed(0);
+  return amount.toStringAsFixed(2);
+}
+
+String formatCostPerKm(double? perKm) {
+  if (perKm == null || !perKm.isFinite) return '--';
+  return '${formatCost(perKm)} /km';
+}
+
+/// A 0–1 share as a whole percentage.
+String formatShare(double? share) {
+  if (share == null || !share.isFinite) return '--';
+  return '${(share * 100).toStringAsFixed(0)} %';
+}

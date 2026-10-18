@@ -73,7 +73,6 @@ class _DrivePageState extends State<DrivePage> {
   final List<double> _recentFuel = [];
   final List<double> _recentSpeed = [];
   static const int _instantWindow = 20;
-  double _fuelPricePerLiter = 0;
 
   @override
   void didChangeDependencies() {
@@ -287,7 +286,6 @@ class _DrivePageState extends State<DrivePage> {
       _recentFuel.clear();
       _recentSpeed.clear();
       _tripStats = LiveTripStats.zero;
-      _fuelPricePerLiter = profile.fuelPricePerLiter;
     });
     _sampleStopwatch
       ..reset()
@@ -435,7 +433,6 @@ class _DrivePageState extends State<DrivePage> {
       speedKph: obd.speedKph,
       iatKelvin: obd.iatKelvin,
       fuelMlPerSec: fuel,
-      engineLoadPercent: obd.engineLoadPercent ?? 0,
       mafGramsPerSec: obd.mafGramsPerSec,
       equivRatio: obd.equivRatio,
       stftPercent: obd.stftPercent,
@@ -474,8 +471,6 @@ class _DrivePageState extends State<DrivePage> {
         distanceKm > 0 ? (totalFuelMl / 1000) / distanceKm * 100 : 0.0;
 
     final instantConsumption = _computeInstantConsumption();
-    final costEstimate =
-        _fuelPricePerLiter > 0 ? (totalFuelMl / 1000) * _fuelPricePerLiter : 0.0;
     final ecoScore = _computeEcoScore(obd.rpm, avgConsumption, distanceKm);
 
     setState(() {
@@ -486,7 +481,7 @@ class _DrivePageState extends State<DrivePage> {
         distanceKm: distanceKm,
         avgConsumptionLPer100km: avgConsumption,
         instantConsumptionLPer100km: instantConsumption,
-        costEstimate: costEstimate,
+        cost: trip.liveCost,
         elapsedSeconds: trip.elapsedSeconds,
         ecoScore: ecoScore,
       );

@@ -595,8 +595,8 @@ class ObdService {
   }
 
   /// [pollPidKeys] filtered by the ECU bitmask, with [essentialPidKeys] unioned
-  /// back in so a partial or bogus bitmask can never strip RPM / speed / MAP /
-  /// MAF. Ordering always follows [pollPidKeys].
+  /// back in so a partial or bogus bitmask can never strip RPM / speed / MAP.
+  /// Ordering always follows [pollPidKeys].
   List<String> _desiredPollPids() {
     final desired = <String>[];
     if (_pidSupport.parsed) {

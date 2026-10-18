@@ -7,6 +7,8 @@ class CarProfile {
     this.notes,
     this.volumetricEfficiency = 85,
     this.fuelPricePerLiter = 0,
+    this.nonFuelCostPerKm = 0,
+    this.driverWagePerHour = 0,
     DateTime? createdAt,
   })  : id = id ?? 'profile-${DateTime.now().millisecondsSinceEpoch}',
         createdAt = createdAt ?? DateTime.now();
@@ -17,6 +19,13 @@ class CarProfile {
   final double? engineDisplacement;
   final double volumetricEfficiency;
   final double fuelPricePerLiter;
+
+  /// k_m of the trip cost model (eq. 3-34): depreciation, maintenance, oil,
+  /// tyres and the per-km share of fixed annual costs. 0 when not set.
+  final double nonFuelCostPerKm;
+
+  /// k_t of the trip cost model (eq. 3-34). 0 when not set.
+  final double driverWagePerHour;
   final String? notes;
   final DateTime createdAt;
 
@@ -37,6 +46,8 @@ class CarProfile {
     double? engineDisplacement,
     double? volumetricEfficiency,
     double? fuelPricePerLiter,
+    double? nonFuelCostPerKm,
+    double? driverWagePerHour,
     String? notes,
   }) {
     return CarProfile(
@@ -46,6 +57,8 @@ class CarProfile {
       engineDisplacement: engineDisplacement ?? this.engineDisplacement,
       volumetricEfficiency: volumetricEfficiency ?? this.volumetricEfficiency,
       fuelPricePerLiter: fuelPricePerLiter ?? this.fuelPricePerLiter,
+      nonFuelCostPerKm: nonFuelCostPerKm ?? this.nonFuelCostPerKm,
+      driverWagePerHour: driverWagePerHour ?? this.driverWagePerHour,
       notes: notes ?? this.notes,
       createdAt: createdAt,
     );
@@ -59,6 +72,8 @@ class CarProfile {
       'engineDisplacement': engineDisplacement,
       'volumetricEfficiency': volumetricEfficiency,
       'fuelPricePerLiter': fuelPricePerLiter,
+      'nonFuelCostPerKm': nonFuelCostPerKm,
+      'driverWagePerHour': driverWagePerHour,
       'notes': notes,
       'createdAt': createdAt.toIso8601String(),
     };
@@ -74,6 +89,11 @@ class CarProfile {
           (map['volumetricEfficiency'] as num?)?.toDouble() ?? 85,
       fuelPricePerLiter:
           (map['fuelPricePerLiter'] as num?)?.toDouble() ?? 0,
+      // Absent from profiles saved before the full cost model.
+      nonFuelCostPerKm:
+          (map['nonFuelCostPerKm'] as num?)?.toDouble() ?? 0,
+      driverWagePerHour:
+          (map['driverWagePerHour'] as num?)?.toDouble() ?? 0,
       notes: map['notes'] as String?,
       createdAt: map['createdAt'] != null
           ? DateTime.tryParse(map['createdAt'] as String) ?? DateTime.now()

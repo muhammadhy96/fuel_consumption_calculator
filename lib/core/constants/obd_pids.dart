@@ -49,14 +49,18 @@ const Map<String, String> pidUnits = {
 };
 
 /// Canonical poll PID keys, in priority order. Keys match [pidByteLength].
+///
+/// 0104 (calculated load) is decoded but not polled: no fuel source uses it.
+/// 0133 feeds the barometric reference of the overrun fuel-cut test.
 const List<String> pollPidKeys = [
-  '010C', '010D', '010B', '0110', '0104', '010F',
-  '0105', '0144', '0106', '0107', '0103', '0111', '0142', '0143', '012F',
+  '010C', '010D', '010B', '0110', '010F', '0105', '0144',
+  '0106', '0107', '0103', '0111', '0142', '0143', '0133', '012F',
 ];
 
 /// PIDs that must survive supported-PID filtering even if the ECU's bitmask
-/// omits them — losing these would break fuel math entirely.
-const Set<String> essentialPidKeys = {'010C', '010D', '010B', '0110'};
+/// omits them — losing these would break fuel math entirely. MAF is left to
+/// the bitmask: speed-density covers a car that does not report it.
+const Set<String> essentialPidKeys = {'010C', '010D', '010B'};
 
 /// Max PIDs per bulk mode-01 request. ELM327 / ISO 15765-4 allows 6.
 const int maxPidsPerBulkRequest = 6;

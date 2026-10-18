@@ -52,7 +52,6 @@ class ObdProvider extends ChangeNotifier {
   double coolantKelvin = 0;
   double throttlePercent = 0;
   double batteryVolts = 0;
-  double? engineLoadPercent;
   double? fuelTankPercent;
   double? fuelRateMlPerSecDirect;
   double? baroKpa;
@@ -361,9 +360,6 @@ class ObdProvider extends ChangeNotifier {
         case '0110':
           mafGramsPerSec = value;
           break;
-        case '0104':
-          engineLoadPercent = value;
-          break;
         case '010F':
           iatKelvin = value;
           break;
@@ -462,7 +458,6 @@ class ObdProvider extends ChangeNotifier {
     coolantKelvin = 0;
     throttlePercent = 0;
     batteryVolts = 0;
-    engineLoadPercent = null;
     fuelTankPercent = null;
     fuelRateMlPerSecDirect = null;
     baroKpa = null;

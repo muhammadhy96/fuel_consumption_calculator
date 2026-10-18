@@ -57,6 +57,18 @@ class TripSummaryPage extends StatelessWidget {
                   'Avg flow',
                   '${trip.avgFuelMlPerSec.toStringAsFixed(2)} mL/s',
                 ),
+                if (trip.totalCost != null) ...[
+                  _StatEntry(
+                    trip.costIsFullModel ? 'Trip cost' : 'Fuel cost only',
+                    formatCost(trip.totalCost!),
+                  ),
+                  _StatEntry(
+                    trip.costIsFullModel ? 'Cost / km' : 'Fuel cost / km',
+                    formatCostPerKm(trip.costPerKm),
+                  ),
+                  if (trip.costIsFullModel)
+                    _StatEntry('Fuel share', formatShare(trip.fuelCostShare)),
+                ],
               ],
             ),
             const SizedBox(height: 16),

@@ -78,6 +78,18 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
     return null;
   }
 
+  /// k_m and k_t of the trip cost model: optional, but never negative.
+  static String? _validateRate(String? text) {
+    if ((text ?? '').trim().isEmpty) return null;
+    final value = _parseNumber(text);
+    if (value == null || value < 0) return 'Enter 0 or more';
+    return null;
+  }
+
+  /// Blank for an unset (0) rate, so the hint shows instead of `0.0`.
+  static String _rateText(double? value) =>
+      (value ?? 0) > 0 ? value.toString() : '';
+
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
 
   late final TextEditingController _nameCtrl;
@@ -85,6 +97,8 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
   late final TextEditingController _notesCtrl;
   late final TextEditingController _veCtrl;
   late final TextEditingController _priceCtrl;
+  late final TextEditingController _nonFuelCostCtrl;
+  late final TextEditingController _wageCtrl;
   late String _fuelType;
 
   @override
@@ -100,9 +114,13 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
       text: profile?.volumetricEfficiency.toString() ?? '85',
     );
     _priceCtrl = TextEditingController(
-      text: (profile?.fuelPricePerLiter ?? 0) > 0
-          ? profile!.fuelPricePerLiter.toString()
-          : '',
+      text: _rateText(profile?.fuelPricePerLiter),
+    );
+    _nonFuelCostCtrl = TextEditingController(
+      text: _rateText(profile?.nonFuelCostPerKm),
+    );
+    _wageCtrl = TextEditingController(
+      text: _rateText(profile?.driverWagePerHour),
     );
     final savedFuelType = profile?.fuelType;
     _fuelType = _fuelTypes.contains(savedFuelType)
@@ -118,6 +136,8 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
     _notesCtrl.dispose();
     _veCtrl.dispose();
     _priceCtrl.dispose();
+    _nonFuelCostCtrl.dispose();
+    _wageCtrl.dispose();
     super.dispose();
   }
 
@@ -127,6 +147,8 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
     final displacement = _parseNumber(_displacementCtrl.text)!;
     final ve = _parseNumber(_veCtrl.text)!;
     final price = _parseNumber(_priceCtrl.text) ?? 0;
+    final nonFuelCost = _parseNumber(_nonFuelCostCtrl.text) ?? 0;
+    final wage = _parseNumber(_wageCtrl.text) ?? 0;
     final notes =
         _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim();
     // Resolved before the await so no BuildContext is used across the gap.
@@ -141,6 +163,8 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
         engineDisplacement: displacement,
         volumetricEfficiency: ve,
         fuelPricePerLiter: price,
+        nonFuelCostPerKm: nonFuelCost,
+        driverWagePerHour: wage,
         notes: notes,
       ));
     } else {
@@ -150,6 +174,8 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
         engineDisplacement: displacement,
         volumetricEfficiency: ve,
         fuelPricePerLiter: price,
+        nonFuelCostPerKm: nonFuelCost,
+        driverWagePerHour: wage,
         notes: notes,
       ));
     }
@@ -264,6 +290,44 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
                 inputFormatters: _decimalInput,
                 validator: _validatePrice,
                 style: const TextStyle(color: Colors.white),
+              ),
+              const SizedBox(height: 14),
+              // Leave either blank and trips show the fuel cost alone.
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: TextFormField(
+                      controller: _nonFuelCostCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Non-fuel cost / km',
+                        helperText: 'Depreciation, upkeep, tyres',
+                        prefixIcon: Icon(Icons.build),
+                      ),
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                      inputFormatters: _decimalInput,
+                      validator: _validateRate,
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: TextFormField(
+                      controller: _wageCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Driver wage / h',
+                        helperText: 'Optional',
+                        prefixIcon: Icon(Icons.schedule),
+                      ),
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                      inputFormatters: _decimalInput,
+                      validator: _validateRate,
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 14),
               TextFormField(

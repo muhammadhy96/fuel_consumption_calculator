@@ -16,6 +16,10 @@ import '../../models/trip_sample.dart';
 /// Shared by the bulk [FileService.saveTripSamples] path and the streaming
 /// [TripCsvWriter] so the two can never drift apart — [FileService.loadTripSamples]
 /// and `TripSample.fromCsvRow` depend on this exact column layout.
+///
+/// Logs written before calculated engine load was dropped carry
+/// [_legacyEngineLoadHeader] at index 6; [FileService.loadTripSamples] looks for
+/// it to pick the right layout.
 const List<String> _tripCsvHeader = [
   'Time (s)',
   'RPM',
@@ -23,7 +27,6 @@ const List<String> _tripCsvHeader = [
   'Speed (km/h)',
   'IAT (K)',
   'Fuel (mL/s)',
-  'Engine Load (%)',
   'MAF (g/s)',
   'Eq Ratio',
   'STFT (%)',
@@ -31,6 +34,8 @@ const List<String> _tripCsvHeader = [
   'Fuel System Status',
   'Abs Load (%)',
 ];
+
+const String _legacyEngineLoadHeader = 'Engine Load (%)';
 
 /// Incremental trip CSV writer.
 ///
@@ -380,13 +385,20 @@ class FileService {
       final rows = const CsvToListConverter().convert(content);
       if (rows.length <= 1) return [];
 
+      final hasEngineLoadColumn =
+          rows.first.map((cell) => '$cell'.trim()).contains(
+                _legacyEngineLoadHeader,
+              );
       final samples = <TripSample>[];
       for (final row in rows.skip(1)) {
         if (row.length < 5) {
           continue;
         }
         try {
-          samples.add(TripSample.fromCsvRow(List<dynamic>.from(row)));
+          samples.add(TripSample.fromCsvRow(
+            List<dynamic>.from(row),
+            hasEngineLoadColumn: hasEngineLoadColumn,
+          ));
         } catch (_) {
           // Skip malformed sample rows to keep the trip readable.
         }

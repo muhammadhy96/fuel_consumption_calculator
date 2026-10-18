@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../core/services/file_service.dart';
 import '../core/services/storage_service.dart';
+import '../core/utils/trip_cost.dart';
 import '../core/utils/trip_integrator.dart';
 import '../models/car_profile.dart';
 import '../models/trip.dart';
@@ -64,6 +65,21 @@ class TripProvider extends ChangeNotifier {
   /// [stopTrip] saves, so the live dashboard reads them too.
   double get totalFuelMl => _totals.fuelMl;
   double get distanceKm => _totals.distanceKm;
+
+  /// Cost of the running trip so far, computed exactly as [stopTrip] will.
+  /// Null when idle or when the profile has no fuel price.
+  TripCost? get liveCost {
+    final profile = _activeProfile;
+    if (!_running || profile == null) return null;
+    return _costOf(
+      fuelMl: _totals.fuelMl,
+      distanceKm: _totals.distanceKm,
+      durationSeconds: _currentDurationSeconds(),
+      fuelPricePerLiter: profile.fuelPricePerLiter,
+      nonFuelCostPerKm: profile.nonFuelCostPerKm,
+      driverWagePerHour: profile.driverWagePerHour,
+    );
+  }
 
   /// Path of the CSV currently being streamed, or null when no trip is running
   /// or the streaming writer could not be opened.
@@ -146,7 +162,8 @@ class TripProvider extends ChangeNotifier {
     _timer = null;
     _running = false;
 
-    final profileId = _activeProfile!.id;
+    final profile = _activeProfile!;
+    final profileId = profile.id;
     final endTime = DateTime.now();
     final duration = _currentDurationSeconds();
 
@@ -164,6 +181,9 @@ class TripProvider extends ChangeNotifier {
       fuelMl: _totals.fuelMl,
       distanceKm: _totals.distanceKm,
       dataFilePath: csvPath,
+      fuelPricePerLiter: profile.fuelPricePerLiter,
+      nonFuelCostPerKm: profile.nonFuelCostPerKm,
+      driverWagePerHour: profile.driverWagePerHour,
     );
 
     final list = _tripsByProfile.putIfAbsent(profileId, () => []);
@@ -268,7 +288,18 @@ class TripProvider extends ChangeNotifier {
     required double distanceKm,
     String? dataFilePath,
     bool inProgress = false,
+    required double fuelPricePerLiter,
+    required double nonFuelCostPerKm,
+    required double driverWagePerHour,
   }) {
+    final cost = _costOf(
+      fuelMl: fuelMl,
+      distanceKm: distanceKm,
+      durationSeconds: durationSeconds,
+      fuelPricePerLiter: fuelPricePerLiter,
+      nonFuelCostPerKm: nonFuelCostPerKm,
+      driverWagePerHour: driverWagePerHour,
+    );
     return Trip(
       id: id,
       profileId: profileId,
@@ -282,6 +313,31 @@ class TripProvider extends ChangeNotifier {
           distanceKm > 0 ? (fuelMl / 1000) / distanceKm * 100 : 0.0,
       dataFilePath: dataFilePath,
       inProgress: inProgress,
+      fuelPricePerLiter: fuelPricePerLiter,
+      nonFuelCostPerKm: nonFuelCostPerKm,
+      driverWagePerHour: driverWagePerHour,
+      totalCost: cost?.total,
+      costPerKm: cost?.costPerKm,
+      fuelCostShare: cost?.fuelShare,
+    );
+  }
+
+  /// Eq. 3-34 on trip totals: V_f in litres, S in km, T in hours.
+  static TripCost? _costOf({
+    required double fuelMl,
+    required double distanceKm,
+    required int durationSeconds,
+    required double fuelPricePerLiter,
+    required double nonFuelCostPerKm,
+    required double driverWagePerHour,
+  }) {
+    return TripCost.compute(
+      fuelLiters: fuelMl / 1000,
+      distanceKm: distanceKm,
+      durationHours: durationSeconds / 3600,
+      fuelPricePerLiter: fuelPricePerLiter,
+      nonFuelCostPerKm: nonFuelCostPerKm,
+      driverWagePerHour: driverWagePerHour,
     );
   }
 
@@ -303,6 +359,9 @@ class TripProvider extends ChangeNotifier {
       distanceKm: _totals.distanceKm,
       dataFilePath: _csvWriter?.path,
       inProgress: true,
+      fuelPricePerLiter: profile.fuelPricePerLiter,
+      nonFuelCostPerKm: profile.nonFuelCostPerKm,
+      driverWagePerHour: profile.driverWagePerHour,
     )));
   }
 
@@ -339,6 +398,10 @@ class TripProvider extends ChangeNotifier {
         fuelMl: totals.fuelMl,
         distanceKm: totals.distanceKm,
         dataFilePath: path,
+        // The rates the trip started with, not the profile's current ones.
+        fuelPricePerLiter: provisional.fuelPricePerLiter,
+        nonFuelCostPerKm: provisional.nonFuelCostPerKm,
+        driverWagePerHour: provisional.driverWagePerHour,
       );
     } else if (provisional.totalFuelMl > 0 || provisional.distanceKm > 0) {
       recovered = _buildTrip(
@@ -350,6 +413,10 @@ class TripProvider extends ChangeNotifier {
         fuelMl: provisional.totalFuelMl,
         distanceKm: provisional.distanceKm,
         dataFilePath: path,
+        // The rates the trip started with, not the profile's current ones.
+        fuelPricePerLiter: provisional.fuelPricePerLiter,
+        nonFuelCostPerKm: provisional.nonFuelCostPerKm,
+        driverWagePerHour: provisional.driverWagePerHour,
       );
     } else {
       try {
