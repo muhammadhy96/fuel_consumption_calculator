@@ -10,17 +10,28 @@ class TripIntegrator {
   static const double maxGapSeconds = 10;
 
   double fuelMl = 0;
+
+  /// From [TripSample.distanceSpeedKph]: GPS where there was a fix.
   double distanceKm = 0;
+
+  /// From the OBD speed alone, for comparison with [distanceKm].
+  double obdDistanceKm = 0;
+
+  /// Whether the latest sample's distance came from GPS.
+  bool lastFromGps = false;
   TripSample? _last;
 
   void add(TripSample sample) {
     final last = _last;
     _last = sample;
+    lastFromGps = sample.gpsSpeedKph != null;
     if (last == null) return;
     final dt = sample.timeSeconds - last.timeSeconds;
     if (dt <= 0 || dt > maxGapSeconds) return;
     fuelMl += ((last.fuelMlPerSec + sample.fuelMlPerSec) / 2) * dt;
-    distanceKm += (((last.speedKph + sample.speedKph) / 2) * dt) / 3600;
+    distanceKm +=
+        (((last.distanceSpeedKph + sample.distanceSpeedKph) / 2) * dt) / 3600;
+    obdDistanceKm += (((last.speedKph + sample.speedKph) / 2) * dt) / 3600;
   }
 
   void addAll(Iterable<TripSample> samples) {
@@ -32,6 +43,8 @@ class TripIntegrator {
   void reset() {
     fuelMl = 0;
     distanceKm = 0;
+    obdDistanceKm = 0;
+    lastFromGps = false;
     _last = null;
   }
 }

@@ -5,20 +5,19 @@
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
 
     <!-- Request new Bluetooth permissions on newer devices. We only enumerate
-         bonded devices, never run a discovery scan, so no location is derived.
-         The flutter_bluetooth_serial plugin still demands ACCESS_COARSE_LOCATION
-         (declared in its own manifest) before it lists bonded devices, on
-         every API level, so the app requests it before connecting. -->
+         bonded devices, never run a discovery scan, so no location is derived
+         from Bluetooth. The flutter_bluetooth_serial plugin still demands
+         ACCESS_COARSE_LOCATION before it lists bonded devices, on every API
+         level, so the app requests it before connecting. -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
-    <!-- Fine location is only needed by the legacy (API <= 30) Bluetooth
-         permission model; coarse location comes from the plugin manifest. -->
-    <uses-permission
-        android:name="android.permission.ACCESS_FINE_LOCATION"
-        android:maxSdkVersion="30" />
+    <!-- Precise location gives the GPS ground speed the trip distance is
+         integrated from (OBD wheel speed reads high when the wheels slip). -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
     <!-- Keeps the OBD poll loop alive while the screen is off / app backgrounded. -->
     <!-- Wi-Fi ELM327 adapters are reached over a plain TCP socket. Network
@@ -29,6 +28,9 @@
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Keeps GPS fixes coming with the screen off, without background
+         location: the service is started while the app is on screen. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
@@ -62,7 +64,7 @@
         <service
             android:name=".TripForegroundService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:foregroundServiceType="connectedDevice|location" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

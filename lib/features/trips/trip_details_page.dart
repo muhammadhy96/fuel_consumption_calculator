@@ -7,6 +7,7 @@ import '../../models/trip.dart';
 import '../../models/trip_sample.dart';
 import '../../state/trip_provider.dart';
 import '../../widgets/confirm_dialog.dart';
+import '../../widgets/cost_breakdown_bar.dart';
 import 'trip_chart.dart';
 import 'trip_export_actions.dart';
 
@@ -124,6 +125,11 @@ class _TripDetailsPageState extends State<TripDetailsPage> {
                 _StatCell(
                     label: 'Distance',
                     value: formatDistance(trip.distanceKm)),
+                // Shows how far the wheel speed was off the GPS distance.
+                if (trip.obdDistanceKm != null)
+                  _StatCell(
+                      label: 'OBD distance',
+                      value: formatDistance(trip.obdDistanceKm!)),
                 _StatCell(
                     label: 'Avg L/100',
                     value: formatConsumption(trip.avgConsumptionLPer100Km)),
@@ -152,6 +158,10 @@ class _TripDetailsPageState extends State<TripDetailsPage> {
                 ],
               ],
             ),
+            if (trip.cost case final cost? when cost.isFullModel) ...[
+              const SizedBox(height: 14),
+              CostBreakdownBar(items: cost.perKmBreakdown),
+            ],
             const SizedBox(height: 16),
             Expanded(
               child: Container(

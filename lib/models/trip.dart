@@ -1,3 +1,6 @@
+import '../core/utils/trip_cost.dart';
+import 'non_fuel_costs.dart';
+
 class Trip {
   Trip({
     required this.id,
@@ -8,11 +11,13 @@ class Trip {
     required this.totalFuelMl,
     required this.avgFuelMlPerSec,
     this.distanceKm = 0,
+    this.obdDistanceKm,
     this.avgConsumptionLPer100Km = 0,
     this.dataFilePath,
     this.inProgress = false,
     this.fuelPricePerLiter = 0,
     this.nonFuelCostPerKm = 0,
+    this.nonFuelCosts,
     this.driverWagePerHour = 0,
     this.totalCost,
     this.costPerKm,
@@ -26,7 +31,14 @@ class Trip {
   final int durationSeconds;
   final double totalFuelMl;
   final double avgFuelMlPerSec;
+
+  /// S: integrated from GPS ground speed where the phone had a fix, and from
+  /// the OBD (wheel) speed elsewhere. See `TripSample.distanceSpeedKph`.
   final double distanceKm;
+
+  /// The same trip integrated from OBD speed alone, kept to show how far the
+  /// wheel speed was off. Null on trips recorded before GPS speed.
+  final double? obdDistanceKm;
   final double avgConsumptionLPer100Km;
   final String? dataFilePath;
 
@@ -39,6 +51,9 @@ class Trip {
   final double fuelPricePerLiter;
   final double nonFuelCostPerKm;
   final double driverWagePerHour;
+
+  /// [nonFuelCostPerKm] by part. Null on trips saved before the breakdown.
+  final NonFuelCosts? nonFuelCosts;
 
   /// C_trip from [TripCost], or the fuel cost alone when [costIsFullModel] is
   /// false. Null when no fuel price was set, and on trips saved before costs
@@ -57,6 +72,20 @@ class Trip {
 
   double get totalFuelLiters => totalFuelMl / 1000;
 
+  /// The trip's cost, rebuilt from its saved totals and rates for the per-km
+  /// breakdown. Null when [totalCost] is.
+  TripCost? get cost {
+    if (totalCost == null) return null;
+    return TripCost.compute(
+      fuelLiters: totalFuelLiters,
+      distanceKm: distanceKm,
+      durationHours: durationSeconds / 3600,
+      fuelPricePerLiter: fuelPricePerLiter,
+      nonFuelCosts: nonFuelCosts ?? NonFuelCosts(other: nonFuelCostPerKm),
+      driverWagePerHour: driverWagePerHour,
+    );
+  }
+
   /// V_f × P_fuel, the price of the litres burned. Null when [totalCost] is.
   double? get fuelCost =>
       totalCost != null ? totalFuelLiters * fuelPricePerLiter : null;
@@ -71,11 +100,13 @@ class Trip {
       'totalFuelMl': totalFuelMl,
       'avgFuelMlPerSec': avgFuelMlPerSec,
       'distanceKm': distanceKm,
+      'obdDistanceKm': obdDistanceKm,
       'avgConsumptionLPer100Km': avgConsumptionLPer100Km,
       'dataFilePath': dataFilePath,
       'inProgress': inProgress,
       'fuelPricePerLiter': fuelPricePerLiter,
       'nonFuelCostPerKm': nonFuelCostPerKm,
+      'nonFuelCosts': nonFuelCosts?.toMap(),
       'driverWagePerHour': driverWagePerHour,
       'totalCost': totalCost,
       'costPerKm': costPerKm,
@@ -95,6 +126,7 @@ class Trip {
       totalFuelMl: (map['totalFuelMl'] as num?)?.toDouble() ?? 0,
       avgFuelMlPerSec: (map['avgFuelMlPerSec'] as num?)?.toDouble() ?? 0,
       distanceKm: (map['distanceKm'] as num?)?.toDouble() ?? 0,
+      obdDistanceKm: (map['obdDistanceKm'] as num?)?.toDouble(),
       avgConsumptionLPer100Km:
           (map['avgConsumptionLPer100Km'] as num?)?.toDouble() ?? 0,
       dataFilePath: map['dataFilePath'] as String?,
@@ -103,6 +135,10 @@ class Trip {
       fuelPricePerLiter:
           (map['fuelPricePerLiter'] as num?)?.toDouble() ?? 0,
       nonFuelCostPerKm: (map['nonFuelCostPerKm'] as num?)?.toDouble() ?? 0,
+      nonFuelCosts: map['nonFuelCosts'] is Map
+          ? NonFuelCosts.fromMap(
+              Map<String, dynamic>.from(map['nonFuelCosts'] as Map))
+          : null,
       driverWagePerHour:
           (map['driverWagePerHour'] as num?)?.toDouble() ?? 0,
       totalCost: (map['totalCost'] as num?)?.toDouble(),

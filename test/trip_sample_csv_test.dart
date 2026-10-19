@@ -1,8 +1,10 @@
-// Trip CSV layouts: the current 12-column one, and the legacy layouts that
-// carried calculated engine load (PID 0104) at index 6.
+// Trip CSV layouts: the current 14-column one (with GPS speed), the 12-column
+// one before it, and the legacy layouts that carried calculated engine load
+// (PID 0104) at index 6.
 
 import 'dart:io';
 
+import 'package:csv/csv.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:fuel_consumption_calculator/core/services/file_service.dart';
@@ -26,7 +28,7 @@ const List<dynamic> legacyRow13 = [
   46.27450980392157,
 ];
 
-/// The same sample in the current layout: engine load dropped.
+/// The same sample with engine load dropped, before the GPS columns.
 const List<dynamic> currentRow12 = [
   8.35,
   1324.25,
@@ -57,6 +59,9 @@ const String currentHeader12 =
     'Fuel (mL/s),MAF (g/s),Eq Ratio,STFT (%),LTFT (%),Fuel System Status,'
     'Abs Load (%)';
 
+const String currentHeader14 = '$currentHeader12,'
+    'GPS Speed (km/h),GPS Speed Accuracy (km/h)';
+
 void expectSameSample(TripSample actual, TripSample expected) {
   expect(actual.timeSeconds, expected.timeSeconds);
   expect(actual.rpm, expected.rpm);
@@ -70,6 +75,8 @@ void expectSameSample(TripSample actual, TripSample expected) {
   expect(actual.ltftPercent, expected.ltftPercent);
   expect(actual.fuelSystemStatus, expected.fuelSystemStatus);
   expect(actual.absoluteLoadPercent, expected.absoluteLoadPercent);
+  expect(actual.gpsSpeedKph, expected.gpsSpeedKph);
+  expect(actual.gpsSpeedAccuracyKph, expected.gpsSpeedAccuracyKph);
 }
 
 void main() {
@@ -141,6 +148,20 @@ void main() {
       expect(row.length, TripSample.csvColumnCount);
       expectSameSample(TripSample.fromCsvRow(row), original);
     });
+
+    test('rows before GPS speed read with no fix', () {
+      final s = TripSample.fromCsvRow(currentRow12);
+      expect(s.gpsSpeedKph, isNull);
+      expect(s.distanceSpeedKph, s.speedKph);
+    });
+
+    test('GPS speed and its accuracy read back from the last columns', () {
+      final s = TripSample.fromCsvRow([...currentRow12, 20.5, 0.9]);
+      expect(s.speedKph, 22.0);
+      expect(s.gpsSpeedKph, 20.5);
+      expect(s.gpsSpeedAccuracyKph, 0.9);
+      expect(s.distanceSpeedKph, 20.5);
+    });
   });
 
   group('FileService.loadTripSamples', () {
@@ -165,6 +186,29 @@ void main() {
       final samples = await load(currentHeader12, currentRow12);
       expect(samples, hasLength(1));
       expectSameSample(samples.single, TripSample.fromCsvRow(legacyRow13));
+    });
+
+    test('reads a 14-column log, with and without a fix', () async {
+      final withFix = await load(currentHeader14, [...currentRow12, 20.5, 0.9]);
+      expect(withFix.single.gpsSpeedKph, 20.5);
+      expect(withFix.single.gpsSpeedAccuracyKph, 0.9);
+
+      final noFix = await load(currentHeader14, [...currentRow12, '', '']);
+      expectSameSample(noFix.single, TripSample.fromCsvRow(currentRow12));
+    });
+
+    test('a sample without a fix is written as blank cells', () async {
+      final rows = [
+        TripSample.fromCsvRow(currentRow12).toCsvRow(),
+        TripSample.fromCsvRow([...currentRow12, 20.5, 0.9]).toCsvRow(),
+      ];
+      final file = File('${dir.path}/trip.csv')
+        ..writeAsStringSync(
+          '$currentHeader14\r\n${const ListToCsvConverter().convert(rows)}',
+        );
+      final samples = await FileService().loadTripSamples(file.path);
+      expect(samples.map((s) => s.gpsSpeedKph), [null, 20.5]);
+      expect(samples.first.absoluteLoadPercent, 46.27450980392157);
     });
 
     test('reads a legacy 12-column log by its header', () async {

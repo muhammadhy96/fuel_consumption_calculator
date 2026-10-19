@@ -5,6 +5,7 @@ import '../../core/utils/formatters.dart';
 import '../../models/car_profile.dart';
 import '../../models/trip.dart';
 import '../../models/trip_sample.dart';
+import '../../widgets/cost_breakdown_bar.dart';
 import 'trip_chart.dart';
 import 'trip_export_actions.dart';
 
@@ -49,6 +50,11 @@ class TripSummaryPage extends StatelessWidget {
                 _StatEntry('Duration', formatDuration(trip.durationSeconds)),
                 _StatEntry('Fuel used', formatFuel(trip.totalFuelMl)),
                 _StatEntry('Distance', formatDistance(trip.distanceKm)),
+                if (trip.obdDistanceKm != null)
+                  _StatEntry(
+                    'OBD distance',
+                    formatDistance(trip.obdDistanceKm!),
+                  ),
                 _StatEntry(
                   'Avg consumption',
                   formatConsumption(trip.avgConsumptionLPer100Km),
@@ -73,6 +79,10 @@ class TripSummaryPage extends StatelessWidget {
                 ],
               ],
             ),
+            if (trip.cost case final cost? when cost.isFullModel) ...[
+              const SizedBox(height: 14),
+              CostBreakdownBar(items: cost.perKmBreakdown),
+            ],
             const SizedBox(height: 16),
             Expanded(
               child: Container(

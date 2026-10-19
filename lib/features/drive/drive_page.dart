@@ -7,6 +7,7 @@ import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/services/gps_speed_service.dart';
 import '../../core/services/obd_transport.dart';
 import '../../core/services/trip_foreground_service.dart';
 import '../../core/theme/app_theme.dart';
@@ -70,6 +71,9 @@ class _DrivePageState extends State<DrivePage> {
   /// would strand every cleanup line after it.
   ObdProvider? _obdRef;
 
+  /// Phone GPS ground speed, which the trip distance prefers to OBD speed.
+  final GpsSpeedService _gps = GpsSpeedService();
+
   final List<double> _recentFuel = [];
   final List<double> _recentSpeed = [];
   static const int _instantWindow = 20;
@@ -91,6 +95,7 @@ class _DrivePageState extends State<DrivePage> {
     // Local teardown runs before anything that could fail, so the foreground
     // notification and the chart controller are always released.
     unawaited(TripForegroundService.stop());
+    _gps.stop();
     _chartController.dispose();
     final obd = _obdRef;
     if (obd != null) {
@@ -123,12 +128,13 @@ class _DrivePageState extends State<DrivePage> {
       return false;
     }
     // The Bluetooth plugin refuses to list paired devices without location
-    // access on every Android version, even though it never scans.
+    // access on every Android version, even though it never scans. The same
+    // grant gives the GPS speed the trip distance is measured with.
     final location = await Permission.location.request();
     if (!location.isGranted) {
       _showPermissionProblem(
-        'Location permission is needed to list paired Bluetooth devices. '
-        'The app does not use your location.',
+        'Location permission is needed to list paired Bluetooth devices '
+        'and to measure distance by GPS.',
         permanentlyDenied: location.isPermanentlyDenied,
       );
       return false;
@@ -267,8 +273,19 @@ class _DrivePageState extends State<DrivePage> {
       final connected = await _connectDevice();
       if (!connected) return;
     }
+    // Before the foreground service starts, which can only keep location
+    // running in the background if permission is already granted.
+    final gpsStatus = await _gps.start();
+    if (!mounted) {
+      _gps.stop();
+      return;
+    }
+    _reportGpsStatus(gpsStatus);
     await obd.startLive();
-    if (!mounted) return;
+    if (!mounted) {
+      _gps.stop();
+      return;
+    }
     // Applied only now, so a cancelled device dialog or a failed connect above
     // leaves the app's selected car exactly as the driver left it. From here on
     // the dashboard header and the recorded trip name the same profile.
@@ -293,6 +310,19 @@ class _DrivePageState extends State<DrivePage> {
     obd.onFrame = _onObdFrame;
     obd.onConnectionLost = _handleConnectionLost;
     unawaited(TripForegroundService.start(profileName: profile.name));
+  }
+
+  /// Says why distance falls back to the OBD speed, when it does.
+  void _reportGpsStatus(GpsStatus status) {
+    final reason = switch (status) {
+      GpsStatus.running => null,
+      GpsStatus.serviceOff => 'Location is off',
+      GpsStatus.permissionDenied => 'Location permission was denied',
+      GpsStatus.approximateOnly => 'Only approximate location is allowed',
+      GpsStatus.unavailable => 'GPS is unavailable',
+    };
+    if (reason == null) return;
+    _showSnack('$reason — distance will use the OBD speed.');
   }
 
   /// Called by [ObdProvider] when the transport drops mid-trip.
@@ -438,11 +468,13 @@ class _DrivePageState extends State<DrivePage> {
       ltftPercent: obd.ltftPercent,
       fuelSystemStatus: obd.fuelSystemStatus ?? 0,
       absoluteLoadPercent: obd.absoluteLoadPercent ?? 0,
+      gpsSpeedKph: _gps.speedKph,
+      gpsSpeedAccuracyKph: _gps.speedAccuracyKph,
     );
     trip.addSample(sample);
 
     _recentFuel.add(fuel);
-    _recentSpeed.add(obd.speedKph);
+    _recentSpeed.add(sample.distanceSpeedKph);
     if (_recentFuel.length > _instantWindow) {
       _recentFuel.removeAt(0);
       _recentSpeed.removeAt(0);
@@ -478,6 +510,7 @@ class _DrivePageState extends State<DrivePage> {
       _tripStats = LiveTripStats(
         totalFuelMl: totalFuelMl,
         distanceKm: distanceKm,
+        distanceFromGps: trip.distanceFromGps,
         avgConsumptionLPer100km: avgConsumption,
         instantConsumptionLPer100km: instantConsumption,
         cost: trip.liveCost,
@@ -510,6 +543,7 @@ class _DrivePageState extends State<DrivePage> {
     final tripProvider = context.read<TripProvider>();
     obd.onFrame = null;
     obd.onConnectionLost = null;
+    _gps.stop();
     await TripForegroundService.stop();
     try {
       await obd.stopLive();

@@ -93,6 +93,7 @@ TripSample sample(
   double timeSeconds, {
   double fuelMlPerSec = 0,
   double speedKph = 0,
+  double? gpsSpeedKph,
 }) => TripSample(
   timeSeconds: timeSeconds,
   rpm: 0,
@@ -102,6 +103,7 @@ TripSample sample(
   fuelMlPerSec: fuelMlPerSec,
   mafGramsPerSec: 0,
   equivRatio: 1,
+  gpsSpeedKph: gpsSpeedKph,
 );
 
 void main() {
@@ -617,7 +619,7 @@ void main() {
       name: 'Test Car',
       fuelType: 'Petrol',
       fuelPricePerLiter: 185,
-      nonFuelCostPerKm: kM,
+      otherCostPerKm: kM,
       driverWagePerHour: kT,
     );
 
@@ -693,6 +695,78 @@ void main() {
       final recovered = provider.tripsForProfile('profile-1').single;
       expect(recovered.totalCost, closeTo(expectedTotal, 1e-9));
       expect(recovered.fuelCostShare, closeTo(fuelCost / expectedTotal, 1e-9));
+    });
+  });
+
+  group('GPS distance', () {
+    test('distance follows GPS speed, OBD distance the wheel speed', () async {
+      provider.startTrip(buildProfile());
+      // Wheels read 40 km/h while the car covers ground at 36 km/h.
+      for (var t = 0; t <= 10; t++) {
+        provider.addSample(
+          sample(t.toDouble(), speedKph: 40, gpsSpeedKph: 36),
+        );
+      }
+      expect(provider.distanceFromGps, isTrue);
+
+      final trip = await provider.stopTrip();
+
+      expect(trip!.distanceKm, closeTo(0.1, 1e-12));
+      expect(trip.obdDistanceKm, closeTo(40 * 10 / 3600, 1e-12));
+    });
+
+    test('samples without a fix fall back to OBD speed', () async {
+      provider.startTrip(buildProfile());
+      provider
+        ..addSample(sample(0, speedKph: 36, gpsSpeedKph: 36))
+        ..addSample(sample(1, speedKph: 36, gpsSpeedKph: 36))
+        // Tunnel: no fix for two samples.
+        ..addSample(sample(2, speedKph: 72))
+        ..addSample(sample(3, speedKph: 72));
+      expect(provider.distanceFromGps, isFalse);
+
+      final trip = await provider.stopTrip();
+
+      // 36 + (36+72)/2 + 72 km/h for one second each.
+      expect(trip!.distanceKm, closeTo((36 + 54 + 72) / 3600, 1e-12));
+    });
+
+    test('a standing car adds no distance from GPS jitter', () async {
+      provider.startTrip(buildProfile());
+      for (var t = 0; t <= 60; t++) {
+        provider.addSample(sample(t.toDouble(), gpsSpeedKph: 1.5));
+      }
+
+      final trip = await provider.stopTrip();
+
+      expect(trip!.distanceKm, 0);
+    });
+
+    test('a recovered trip re-integrates GPS distance from its CSV', () async {
+      final start = DateTime(2026, 10, 18, 8);
+      files.csvByPath['/exports/crashed.csv'] = [
+        for (var t = 0; t <= 10; t++)
+          sample(t.toDouble(), speedKph: 40, gpsSpeedKph: 36),
+      ];
+      storage.trips.add(
+        Trip(
+          id: 'trip-crashed',
+          profileId: 'profile-1',
+          startTime: start,
+          endTime: start,
+          durationSeconds: 0,
+          totalFuelMl: 0,
+          avgFuelMlPerSec: 0,
+          dataFilePath: '/exports/crashed.csv',
+          inProgress: true,
+        ),
+      );
+
+      await provider.loadTrips();
+
+      final recovered = provider.tripsForProfile('profile-1').single;
+      expect(recovered.distanceKm, closeTo(0.1, 1e-12));
+      expect(recovered.obdDistanceKm, closeTo(40 * 10 / 3600, 1e-12));
     });
   });
 }

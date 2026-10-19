@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/theme/app_theme.dart';
+import '../../core/utils/formatters.dart';
 import '../../models/car_profile.dart';
 import '../../state/profile_provider.dart';
 
@@ -89,8 +90,25 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
   late final TextEditingController _displacementCtrl;
   late final TextEditingController _notesCtrl;
   late final TextEditingController _priceCtrl;
-  late final TextEditingController _nonFuelCostCtrl;
+  late final TextEditingController _carPriceCtrl;
+  late final TextEditingController _resaleCtrl;
+  late final TextEditingController _yearsCtrl;
+  late final TextEditingController _annualKmCtrl;
+  late final TextEditingController _maintenanceCtrl;
+  late final TextEditingController _insuranceCtrl;
+  late final TextEditingController _otherCostCtrl;
   late final TextEditingController _wageCtrl;
+
+  /// The k_m inputs, so the per-km preview follows every keystroke.
+  late final Listenable _costInputs = Listenable.merge([
+    _carPriceCtrl,
+    _resaleCtrl,
+    _yearsCtrl,
+    _annualKmCtrl,
+    _maintenanceCtrl,
+    _insuranceCtrl,
+    _otherCostCtrl,
+  ]);
   late String _fuelType;
 
   @override
@@ -105,9 +123,17 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
     _priceCtrl = TextEditingController(
       text: _rateText(profile?.fuelPricePerLiter),
     );
-    _nonFuelCostCtrl = TextEditingController(
-      text: _rateText(profile?.nonFuelCostPerKm),
-    );
+    _carPriceCtrl = TextEditingController(text: _rateText(profile?.carPrice));
+    _resaleCtrl = TextEditingController(text: _rateText(profile?.resaleValue));
+    _yearsCtrl =
+        TextEditingController(text: _rateText(profile?.ownershipYears));
+    _annualKmCtrl = TextEditingController(text: _rateText(profile?.annualKm));
+    _maintenanceCtrl =
+        TextEditingController(text: _rateText(profile?.maintenancePerYear));
+    _insuranceCtrl =
+        TextEditingController(text: _rateText(profile?.insurancePerYear));
+    _otherCostCtrl =
+        TextEditingController(text: _rateText(profile?.otherCostPerKm));
     _wageCtrl = TextEditingController(
       text: _rateText(profile?.driverWagePerHour),
     );
@@ -124,7 +150,13 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
     _displacementCtrl.dispose();
     _notesCtrl.dispose();
     _priceCtrl.dispose();
-    _nonFuelCostCtrl.dispose();
+    _carPriceCtrl.dispose();
+    _resaleCtrl.dispose();
+    _yearsCtrl.dispose();
+    _annualKmCtrl.dispose();
+    _maintenanceCtrl.dispose();
+    _insuranceCtrl.dispose();
+    _otherCostCtrl.dispose();
     _wageCtrl.dispose();
     super.dispose();
   }
@@ -134,7 +166,7 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
     // Displacement passed validation, so it parses.
     final displacement = _parseNumber(_displacementCtrl.text)!;
     final price = _parseNumber(_priceCtrl.text) ?? 0;
-    final nonFuelCost = _parseNumber(_nonFuelCostCtrl.text) ?? 0;
+    final costs = _costProfile();
     final wage = _parseNumber(_wageCtrl.text) ?? 0;
     final notes =
         _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim();
@@ -149,7 +181,13 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
         fuelType: _fuelType,
         engineDisplacement: displacement,
         fuelPricePerLiter: price,
-        nonFuelCostPerKm: nonFuelCost,
+        carPrice: costs.carPrice,
+        resaleValue: costs.resaleValue,
+        ownershipYears: costs.ownershipYears,
+        annualKm: costs.annualKm,
+        maintenancePerYear: costs.maintenancePerYear,
+        insurancePerYear: costs.insurancePerYear,
+        otherCostPerKm: costs.otherCostPerKm,
         driverWagePerHour: wage,
         notes: notes,
       ));
@@ -159,12 +197,102 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
         fuelType: _fuelType,
         engineDisplacement: displacement,
         fuelPricePerLiter: price,
-        nonFuelCostPerKm: nonFuelCost,
+        carPrice: costs.carPrice,
+        resaleValue: costs.resaleValue,
+        ownershipYears: costs.ownershipYears,
+        annualKm: costs.annualKm,
+        maintenancePerYear: costs.maintenancePerYear,
+        insurancePerYear: costs.insurancePerYear,
+        otherCostPerKm: costs.otherCostPerKm,
         driverWagePerHour: wage,
         notes: notes,
       ));
     }
     if (mounted) navigator.pop();
+  }
+
+  /// The k_m inputs as typed, on a throwaway profile, so the preview and the
+  /// saved profile derive the per-km rates the same way.
+  CarProfile _costProfile() {
+    double read(TextEditingController ctrl) {
+      final value = _parseNumber(ctrl.text) ?? 0;
+      return value > 0 ? value : 0;
+    }
+
+    return CarProfile(
+      name: '',
+      fuelType: _fuelType,
+      carPrice: read(_carPriceCtrl),
+      resaleValue: read(_resaleCtrl),
+      ownershipYears: read(_yearsCtrl),
+      annualKm: read(_annualKmCtrl),
+      maintenancePerYear: read(_maintenanceCtrl),
+      insurancePerYear: read(_insuranceCtrl),
+      otherCostPerKm: read(_otherCostCtrl),
+    );
+  }
+
+  String? _validateResale(String? text) {
+    final error = _validateRate(text);
+    if (error != null) return error;
+    final resale = _parseNumber(text) ?? 0;
+    final price = _parseNumber(_carPriceCtrl.text) ?? 0;
+    if (price > 0 && resale > price) return 'Above the price';
+    return null;
+  }
+
+  Widget _rateField(
+    TextEditingController controller,
+    String label, {
+    String? helper,
+    IconData? icon,
+    FormFieldValidator<String> validator = _validateRate,
+  }) {
+    return TextFormField(
+      controller: controller,
+      decoration: InputDecoration(
+        labelText: label,
+        helperText: helper,
+        prefixIcon: icon != null ? Icon(icon) : null,
+      ),
+      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+      inputFormatters: _decimalInput,
+      validator: validator,
+      style: const TextStyle(color: Colors.white),
+    );
+  }
+
+  Widget _fieldPair(Widget left, Widget right) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(child: left),
+        const SizedBox(width: 12),
+        Expanded(child: right),
+      ],
+    );
+  }
+
+  /// k_m as the profile will compute it, part by part.
+  Widget _costPreview() {
+    return ListenableBuilder(
+      listenable: _costInputs,
+      builder: (context, _) {
+        final costs = _costProfile().nonFuelCosts;
+        final parts = costs.parts;
+        final text = parts.isEmpty
+            ? 'Fill in any of these to add car costs per km.'
+            : '= ${formatCostPerKm(costs.total)}  ('
+                '${parts.map((p) => '${p.$1} ${formatCost(p.$2)}').join(', ')})';
+        return Text(
+          text,
+          style: TextStyle(
+            color: Colors.white.withValues(alpha: 0.6),
+            fontSize: 12,
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -256,43 +384,47 @@ class _ProfileFormSheetState extends State<_ProfileFormSheet> {
                 style: const TextStyle(color: Colors.white),
               ),
               const SizedBox(height: 14),
-              // Leave either blank and trips show the fuel cost alone.
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: TextFormField(
-                      controller: _nonFuelCostCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Non-fuel cost / km',
-                        helperText: 'Depreciation, upkeep, tyres',
-                        prefixIcon: Icon(Icons.build),
-                      ),
-                      keyboardType:
-                          const TextInputType.numberWithOptions(decimal: true),
-                      inputFormatters: _decimalInput,
-                      validator: _validateRate,
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: TextFormField(
-                      controller: _wageCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Driver wage / h',
-                        helperText: 'Optional',
-                        prefixIcon: Icon(Icons.schedule),
-                      ),
-                      keyboardType:
-                          const TextInputType.numberWithOptions(decimal: true),
-                      inputFormatters: _decimalInput,
-                      validator: _validateRate,
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                  ),
-                ],
+              const SizedBox(height: 22),
+              Text(
+                'CAR RUNNING COSTS (OPTIONAL)',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.6),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 1.3,
+                ),
               ),
+              const SizedBox(height: 10),
+              // Depreciation = (price − resale) / (years × km per year).
+              _fieldPair(
+                _rateField(_carPriceCtrl, 'Car price',
+                    icon: Icons.directions_car_filled),
+                _rateField(_resaleCtrl, 'Resale value',
+                    helper: 'Expected when sold', validator: _validateResale),
+              ),
+              const SizedBox(height: 14),
+              _fieldPair(
+                _rateField(_yearsCtrl, 'Years kept', icon: Icons.event),
+                _rateField(_annualKmCtrl, 'Km per year', icon: Icons.speed),
+              ),
+              const SizedBox(height: 14),
+              _fieldPair(
+                _rateField(_maintenanceCtrl, 'Maintenance / year',
+                    helper: 'Service, repairs, tyres', icon: Icons.build),
+                _rateField(_insuranceCtrl, 'Insurance & tax / year',
+                    icon: Icons.shield_outlined),
+              ),
+              const SizedBox(height: 14),
+              // Leave all costs or the wage blank and trips show the fuel cost
+              // alone.
+              _fieldPair(
+                _rateField(_otherCostCtrl, 'Other cost / km',
+                    helper: 'Parking, tolls', icon: Icons.more_horiz),
+                _rateField(_wageCtrl, 'Driver wage / h',
+                    helper: 'Optional', icon: Icons.schedule),
+              ),
+              const SizedBox(height: 10),
+              _costPreview(),
               const SizedBox(height: 14),
               TextFormField(
                 controller: _notesCtrl,

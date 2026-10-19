@@ -8,6 +8,7 @@ import '../../models/car_profile.dart';
 import '../../state/obd_provider.dart';
 import '../../state/trip_provider.dart';
 import '../../widgets/circular_gauge.dart';
+import '../../widgets/cost_breakdown_bar.dart';
 import '../../widgets/metric_tile.dart';
 import '../../widgets/stat_pill.dart';
 
@@ -51,6 +52,7 @@ class LiveTripStats {
   const LiveTripStats({
     required this.totalFuelMl,
     required this.distanceKm,
+    this.distanceFromGps = false,
     required this.avgConsumptionLPer100km,
     required this.instantConsumptionLPer100km,
     required this.cost,
@@ -60,6 +62,9 @@ class LiveTripStats {
 
   final double totalFuelMl;
   final double distanceKm;
+
+  /// Whether the distance is currently being measured by GPS (else OBD speed).
+  final bool distanceFromGps;
   final double avgConsumptionLPer100km;
   final double instantConsumptionLPer100km;
   /// Eq. 3-34 on the running totals; null when the profile has no fuel price.
@@ -622,7 +627,9 @@ class _TripStatsCard extends StatelessWidget {
             children: [
               Expanded(
                 child: _TripStatCell(
-                  label: 'Distance',
+                  label: tripStats.distanceFromGps
+                      ? 'Distance · GPS'
+                      : 'Distance · OBD',
                   value: tripStats.distanceKm.toStringAsFixed(2),
                   unit: 'km',
                 ),
@@ -667,7 +674,7 @@ class _TripStatsCard extends StatelessWidget {
                           unit: '%',
                         )
                       : Text(
-                          'Fuel cost only. Set non-fuel cost per km and '
+                          'Fuel cost only. Set the car running costs and '
                           'driver wage on the profile for the full trip cost.',
                           style: TextStyle(
                             color: Colors.white.withValues(alpha: 0.55),
@@ -677,6 +684,10 @@ class _TripStatsCard extends StatelessWidget {
                 ),
               ],
             ),
+            if (fullModel && cost.perKmBreakdown.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              CostBreakdownBar(items: cost.perKmBreakdown),
+            ],
           ],
         ],
       ),

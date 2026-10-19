@@ -33,6 +33,8 @@ const List<String> _tripCsvHeader = [
   'LTFT (%)',
   'Fuel System Status',
   'Abs Load (%)',
+  'GPS Speed (km/h)',
+  'GPS Speed Accuracy (km/h)',
 ];
 
 const String _legacyEngineLoadHeader = 'Engine Load (%)';

@@ -1,10 +1,12 @@
 package dev.muham.fueltriptracker
 
+import android.Manifest
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -19,8 +21,10 @@ import androidx.core.content.ContextCompat
  * Foreground service that keeps the Dart OBD poll loop scheduled while the
  * screen is off or the app is backgrounded.
  *
- * The service itself holds no Bluetooth state; it exists purely so Android
- * stops throttling (and eventually killing) the process mid-drive.
+ * The service itself holds no Bluetooth or location state; it exists purely
+ * so Android stops throttling (and eventually killing) the process mid-drive,
+ * and, with location permission, keeps the Dart GPS stream alive with the
+ * screen off.
  */
 class TripForegroundService : Service() {
 
@@ -55,7 +59,14 @@ class TripForegroundService : Service() {
         return try {
             ensureChannel()
             val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                // API 34 refuses the location type without a location grant,
+                // and the trip must still record without GPS.
+                val location = if (hasLocationPermission()) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                } else {
+                    0
+                }
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or location
             } else {
                 0
             }
@@ -74,6 +85,15 @@ class TripForegroundService : Service() {
             false
         }
     }
+
+    private fun hasLocationPermission(): Boolean =
+        listOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+        ).any {
+            ContextCompat.checkSelfPermission(this, it) ==
+                PackageManager.PERMISSION_GRANTED
+        }
 
     private fun stopTracking() {
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)

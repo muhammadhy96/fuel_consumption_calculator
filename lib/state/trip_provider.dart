@@ -7,6 +7,7 @@ import '../core/services/storage_service.dart';
 import '../core/utils/trip_cost.dart';
 import '../core/utils/trip_integrator.dart';
 import '../models/car_profile.dart';
+import '../models/non_fuel_costs.dart';
 import '../models/trip.dart';
 import '../models/trip_sample.dart';
 
@@ -66,6 +67,9 @@ class TripProvider extends ChangeNotifier {
   double get totalFuelMl => _totals.fuelMl;
   double get distanceKm => _totals.distanceKm;
 
+  /// Whether the latest sample's distance came from GPS rather than OBD speed.
+  bool get distanceFromGps => _running && _totals.lastFromGps;
+
   /// Cost of the running trip so far, computed exactly as [stopTrip] will.
   /// Null when idle or when the profile has no fuel price.
   TripCost? get liveCost {
@@ -76,7 +80,7 @@ class TripProvider extends ChangeNotifier {
       distanceKm: _totals.distanceKm,
       durationSeconds: _currentDurationSeconds(),
       fuelPricePerLiter: profile.fuelPricePerLiter,
-      nonFuelCostPerKm: profile.nonFuelCostPerKm,
+      nonFuelCosts: profile.nonFuelCosts,
       driverWagePerHour: profile.driverWagePerHour,
     );
   }
@@ -180,9 +184,10 @@ class TripProvider extends ChangeNotifier {
       durationSeconds: duration,
       fuelMl: _totals.fuelMl,
       distanceKm: _totals.distanceKm,
+      obdDistanceKm: _totals.obdDistanceKm,
       dataFilePath: csvPath,
       fuelPricePerLiter: profile.fuelPricePerLiter,
-      nonFuelCostPerKm: profile.nonFuelCostPerKm,
+      nonFuelCosts: profile.nonFuelCosts,
       driverWagePerHour: profile.driverWagePerHour,
     );
 
@@ -286,10 +291,11 @@ class TripProvider extends ChangeNotifier {
     required int durationSeconds,
     required double fuelMl,
     required double distanceKm,
+    double? obdDistanceKm,
     String? dataFilePath,
     bool inProgress = false,
     required double fuelPricePerLiter,
-    required double nonFuelCostPerKm,
+    required NonFuelCosts nonFuelCosts,
     required double driverWagePerHour,
   }) {
     final cost = _costOf(
@@ -297,7 +303,7 @@ class TripProvider extends ChangeNotifier {
       distanceKm: distanceKm,
       durationSeconds: durationSeconds,
       fuelPricePerLiter: fuelPricePerLiter,
-      nonFuelCostPerKm: nonFuelCostPerKm,
+      nonFuelCosts: nonFuelCosts,
       driverWagePerHour: driverWagePerHour,
     );
     return Trip(
@@ -309,12 +315,14 @@ class TripProvider extends ChangeNotifier {
       totalFuelMl: fuelMl,
       avgFuelMlPerSec: durationSeconds > 0 ? fuelMl / durationSeconds : 0.0,
       distanceKm: distanceKm,
+      obdDistanceKm: obdDistanceKm,
       avgConsumptionLPer100Km:
           distanceKm > 0 ? (fuelMl / 1000) / distanceKm * 100 : 0.0,
       dataFilePath: dataFilePath,
       inProgress: inProgress,
       fuelPricePerLiter: fuelPricePerLiter,
-      nonFuelCostPerKm: nonFuelCostPerKm,
+      nonFuelCostPerKm: nonFuelCosts.total,
+      nonFuelCosts: nonFuelCosts,
       driverWagePerHour: driverWagePerHour,
       totalCost: cost?.total,
       costPerKm: cost?.costPerKm,
@@ -328,7 +336,7 @@ class TripProvider extends ChangeNotifier {
     required double distanceKm,
     required int durationSeconds,
     required double fuelPricePerLiter,
-    required double nonFuelCostPerKm,
+    required NonFuelCosts nonFuelCosts,
     required double driverWagePerHour,
   }) {
     return TripCost.compute(
@@ -336,7 +344,7 @@ class TripProvider extends ChangeNotifier {
       distanceKm: distanceKm,
       durationHours: durationSeconds / 3600,
       fuelPricePerLiter: fuelPricePerLiter,
-      nonFuelCostPerKm: nonFuelCostPerKm,
+      nonFuelCosts: nonFuelCosts,
       driverWagePerHour: driverWagePerHour,
     );
   }
@@ -357,10 +365,11 @@ class TripProvider extends ChangeNotifier {
       durationSeconds: duration,
       fuelMl: _totals.fuelMl,
       distanceKm: _totals.distanceKm,
+      obdDistanceKm: _totals.obdDistanceKm,
       dataFilePath: _csvWriter?.path,
       inProgress: true,
       fuelPricePerLiter: profile.fuelPricePerLiter,
-      nonFuelCostPerKm: profile.nonFuelCostPerKm,
+      nonFuelCosts: profile.nonFuelCosts,
       driverWagePerHour: profile.driverWagePerHour,
     )));
   }
@@ -385,6 +394,9 @@ class TripProvider extends ChangeNotifier {
         debugPrint('Failed to read CSV of interrupted trip: $err');
       }
     }
+    // Trips started before the k_m breakdown carry it as one number.
+    final nonFuelCosts = provisional.nonFuelCosts ??
+        NonFuelCosts(other: provisional.nonFuelCostPerKm);
     final Trip recovered;
     if (samples.isNotEmpty) {
       final totals = TripIntegrator()..addAll(samples);
@@ -397,10 +409,11 @@ class TripProvider extends ChangeNotifier {
         durationSeconds: duration,
         fuelMl: totals.fuelMl,
         distanceKm: totals.distanceKm,
+        obdDistanceKm: totals.obdDistanceKm,
         dataFilePath: path,
         // The rates the trip started with, not the profile's current ones.
         fuelPricePerLiter: provisional.fuelPricePerLiter,
-        nonFuelCostPerKm: provisional.nonFuelCostPerKm,
+        nonFuelCosts: nonFuelCosts,
         driverWagePerHour: provisional.driverWagePerHour,
       );
     } else if (provisional.totalFuelMl > 0 || provisional.distanceKm > 0) {
@@ -412,10 +425,11 @@ class TripProvider extends ChangeNotifier {
         durationSeconds: provisional.durationSeconds,
         fuelMl: provisional.totalFuelMl,
         distanceKm: provisional.distanceKm,
+        obdDistanceKm: provisional.obdDistanceKm,
         dataFilePath: path,
         // The rates the trip started with, not the profile's current ones.
         fuelPricePerLiter: provisional.fuelPricePerLiter,
-        nonFuelCostPerKm: provisional.nonFuelCostPerKm,
+        nonFuelCosts: nonFuelCosts,
         driverWagePerHour: provisional.driverWagePerHour,
       );
     } else {
