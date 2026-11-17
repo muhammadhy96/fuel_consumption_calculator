@@ -6,6 +6,7 @@ import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 
 import '../core/services/obd_service.dart';
 import '../core/services/obd_transport.dart';
+import '../core/utils/can_monitor.dart';
 import '../core/utils/obd_frame_decoder.dart';
 
 /// Where the current fuel-flow figure comes from.
@@ -21,6 +22,7 @@ class ObdProvider extends ChangeNotifier {
   ObdProvider(this._obdService) {
     _obdService.onDisconnected = _handleServiceDisconnected;
     _obdService.onCycleComplete = _handleCycleComplete;
+    _obdService.onCanFrame = _handleCanFrame;
   }
 
   final ObdService _obdService;
@@ -57,6 +59,14 @@ class ObdProvider extends ChangeNotifier {
   double? baroKpa;
   String? lastRawMessage;
   DateTime? lastUpdate;
+
+  /// Latest [CanFuelSignal] frame read from the broadcast traffic.
+  List<int>? canFrame;
+  int? _canFrameAtMs;
+
+  /// Captured since the last [takeCanFrame], so each frame lands in exactly
+  /// one trip sample.
+  List<int>? _pendingCanFrame;
   DateTime? _lastLogTime;
   bool _disposed = false;
   bool _fuelRateProbed = false;
@@ -102,6 +112,36 @@ class ObdProvider extends ChangeNotifier {
 
   /// Wall time of the last completed poll cycle, in milliseconds.
   int get lastCycleMillis => _obdService.lastCycleMillis;
+
+  /// True while the poll loop reads the ECU's fuel signal from CAN.
+  bool get canCaptureActive => _obdService.canCaptureActive;
+  int get canCaptures => _obdService.canCaptures;
+  int get canFailures => _obdService.canFailures;
+  int get lastCanCaptureMillis => _obdService.lastCanCaptureMillis;
+
+  /// Raw [CanFuelSignal] byte of the latest frame, null when none was read
+  /// within [freshnessWindowMs].
+  int? get canFuelRaw {
+    final frame = canFrame;
+    final at = _canFrameAtMs;
+    if (frame == null || at == null) return null;
+    if (_clock.elapsedMilliseconds - at > freshnessWindowMs) return null;
+    return frame[CanFuelSignal.fuelByte];
+  }
+
+  /// [canFuelRaw] at the estimated scale, mL/s.
+  double? get canFuelMlPerSec {
+    final raw = canFuelRaw;
+    return raw == null ? null : CanFuelSignal.mlPerSecFromRaw(raw);
+  }
+
+  /// The frame captured since the previous call, or null. Trip sampling takes
+  /// it so the CSV holds each frame once, in the row of the cycle that read it.
+  List<int>? takeCanFrame() {
+    final frame = _pendingCanFrame;
+    _pendingCanFrame = null;
+    return frame;
+  }
 
   double get smoothedFuelMlPerSec {
     if (_smoothFuelWindow.isEmpty) return 0;
@@ -327,6 +367,13 @@ class ObdProvider extends ChangeNotifier {
     _notifyIfActive();
   }
 
+  void _handleCanFrame(List<int> frame) {
+    if (_disposed || frame.length <= CanFuelSignal.fuelByte) return;
+    canFrame = frame;
+    _canFrameAtMs = _clock.elapsedMilliseconds;
+    _pendingCanFrame = frame;
+  }
+
   void _learnClosedThrottle() {
     if (!_isFresh('0111') || !_isFresh('010C')) return;
     final closed = _closedThrottlePercent;
@@ -435,6 +482,7 @@ class ObdProvider extends ChangeNotifier {
     onConnectionLost = null;
     _obdService.onDisconnected = null;
     _obdService.onCycleComplete = null;
+    _obdService.onCanFrame = null;
     unawaited(_obdService.disconnect(notify: false));
     super.dispose();
   }
@@ -463,6 +511,9 @@ class ObdProvider extends ChangeNotifier {
     fuelRateMlPerSecDirect = null;
     baroKpa = null;
     _decodedAtMs.clear();
+    canFrame = null;
+    _canFrameAtMs = null;
+    _pendingCanFrame = null;
     _smoothFuelWindow.clear();
     _smoothFuelSum = 0;
     _framesDecoded = 0;

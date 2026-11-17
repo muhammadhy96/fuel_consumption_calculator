@@ -14,6 +14,8 @@ class TripSample {
     this.absoluteLoadPercent = 0,
     this.gpsSpeedKph,
     this.gpsSpeedAccuracyKph,
+    this.canFuelRaw,
+    this.canFrameHex,
   });
 
   final double timeSeconds;
@@ -37,6 +39,14 @@ class TripSample {
   /// 1-σ accuracy of [gpsSpeedKph], or null when the phone does not report it.
   final double? gpsSpeedAccuracyKph;
 
+  /// Raw ECU fuel byte ([CanFuelSignal]) read from CAN during this sample's
+  /// poll cycle, or null when none was read in it (reads run about once a
+  /// second, the poll cycle faster).
+  final int? canFuelRaw;
+
+  /// The whole 8-byte frame [canFuelRaw] came from, e.g. `8C A6 00 89 ...`.
+  final String? canFrameHex;
+
   /// The speed the trip distance is integrated from.
   ///
   /// GPS ground speed when there is a fix: the OBD speed is wheel speed, which
@@ -50,7 +60,7 @@ class TripSample {
   }
 
   /// Column count of the layout [toCsvRow] writes.
-  static const int csvColumnCount = 14;
+  static const int csvColumnCount = 16;
 
   List<dynamic> toCsvRow() => [
         timeSeconds,
@@ -68,15 +78,19 @@ class TripSample {
         // Blank cells when there was no fix.
         gpsSpeedKph,
         gpsSpeedAccuracyKph,
+        // Blank cells in cycles without a CAN read.
+        canFuelRaw,
+        canFrameHex,
       ];
 
   /// Reads a row of any layout the app has written.
   ///
-  /// Current layout, 14 columns:
+  /// Current layout, 16 columns:
   ///   time, RPM, MAP, speed, IAT, fuel, MAF, λ, STFT, LTFT, 0103, abs load,
-  ///   GPS speed, GPS speed accuracy
+  ///   GPS speed, GPS speed accuracy, CAN fuel raw, CAN frame
   ///
-  /// The same layout without the two GPS columns (12) came before it. Earlier
+  /// The same layout without the two CAN columns (14), and without the two
+  /// GPS columns too (12), came before it. Earlier
   /// layouts logged calculated engine load (0104) at index 6, shifting
   /// everything after it by one, and grew by appending columns: 5 (no speed),
   /// 6, 9 (to λ), 11 (+ trims), 12 (+ 0103) and 13 (+ abs load).
@@ -91,7 +105,7 @@ class TripSample {
     bool? hasEngineLoadColumn,
   }) {
     final isCurrentLayout = hasEngineLoadColumn == null
-        ? row.length == 12 || row.length == csvColumnCount
+        ? row.length == 12 || row.length == 14 || row.length == csvColumnCount
         : !hasEngineLoadColumn && row.length >= 9;
     return isCurrentLayout
         ? TripSample._fromCurrentRow(row)
@@ -114,6 +128,8 @@ class TripSample {
       absoluteLoadPercent: _num(row[11]),
       gpsSpeedKph: row.length > 12 ? _numOrNull(row[12]) : null,
       gpsSpeedAccuracyKph: row.length > 13 ? _numOrNull(row[13]) : null,
+      canFuelRaw: row.length > 14 ? _numOrNull(row[14])?.toInt() : null,
+      canFrameHex: row.length > 15 ? _textOrNull(row[15]) : null,
     );
   }
 
@@ -147,4 +163,11 @@ class TripSample {
   /// A blank cell reads back as an empty string.
   static double? _numOrNull(dynamic value) =>
       value is num ? value.toDouble() : null;
+
+  /// The CSV writer prints a null cell as `null`; a blank cell reads back
+  /// empty. Both mean no value.
+  static String? _textOrNull(dynamic value) {
+    final text = '${value ?? ''}'.trim();
+    return text.isEmpty || text == 'null' ? null : text;
+  }
 }

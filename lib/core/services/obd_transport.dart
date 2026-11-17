@@ -60,6 +60,10 @@ abstract class ObdTransport {
 
   Future<void> write(String command);
 
+  /// Sends [chars] exactly as given, with no CR. Any character stops an
+  /// ELM327 `AT MA` monitor; a CR would also repeat the last command.
+  Future<void> writeRaw(String chars);
+
   Future<void> close();
 
   /// True when a failed [open] is worth retrying (adapter briefly busy or
@@ -103,6 +107,16 @@ class BluetoothObdTransport implements ObdTransport {
     }
     // ELM327 terminates on CR; a trailing LF is echoed back as noise.
     conn.output.add(Uint8List.fromList(utf8.encode('$command\r')));
+    await conn.output.allSent;
+  }
+
+  @override
+  Future<void> writeRaw(String chars) async {
+    final conn = _obd2.connection;
+    if (conn == null || !conn.isConnected) {
+      throw StateError('OBD Bluetooth connection lost');
+    }
+    conn.output.add(Uint8List.fromList(utf8.encode(chars)));
     await conn.output.allSent;
   }
 
@@ -177,6 +191,16 @@ class WifiObdTransport implements ObdTransport {
       throw StateError('OBD Wi-Fi connection lost');
     }
     socket.add(utf8.encode('$command\r'));
+    await socket.flush();
+  }
+
+  @override
+  Future<void> writeRaw(String chars) async {
+    final socket = _socket;
+    if (socket == null || !_open) {
+      throw StateError('OBD Wi-Fi connection lost');
+    }
+    socket.add(utf8.encode(chars));
     await socket.flush();
   }
 

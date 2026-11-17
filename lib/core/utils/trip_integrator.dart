@@ -1,4 +1,5 @@
 import '../../models/trip_sample.dart';
+import 'can_monitor.dart';
 
 /// Trapezoidal fuel and distance totals over consecutive trip samples.
 ///
@@ -21,17 +22,58 @@ class TripIntegrator {
   bool lastFromGps = false;
   TripSample? _last;
 
+  /// CAN fuel reads further apart than this are not bridged.
+  static const double maxCanGapSeconds = 5;
+
+  /// Integral of the raw ECU fuel byte over time (count x s), between
+  /// consecutive samples that carry a CAN read.
+  double canRawSeconds = 0;
+
+  /// Time covered by [canRawSeconds], and the app's own fuel over exactly
+  /// that time, so the two can be compared like for like.
+  double canCoveredSeconds = 0;
+  double appFuelMlOverCan = 0;
+
+  double? _lastCanTime;
+  int? _lastCanRaw;
+  double _appFuelMlAtLastCan = 0;
+
+  /// The ECU's fuel over the trip at the estimated [CanFuelSignal] scale.
+  double get canFuelMl => canRawSeconds * CanFuelSignal.lphPerCount / 3.6;
+
   void add(TripSample sample) {
     final last = _last;
     _last = sample;
     lastFromGps = sample.gpsSpeedKph != null;
-    if (last == null) return;
-    final dt = sample.timeSeconds - last.timeSeconds;
-    if (dt <= 0 || dt > maxGapSeconds) return;
-    fuelMl += ((last.fuelMlPerSec + sample.fuelMlPerSec) / 2) * dt;
-    distanceKm +=
-        (((last.distanceSpeedKph + sample.distanceSpeedKph) / 2) * dt) / 3600;
-    obdDistanceKm += (((last.speedKph + sample.speedKph) / 2) * dt) / 3600;
+    if (last != null) {
+      final dt = sample.timeSeconds - last.timeSeconds;
+      if (dt > 0 && dt <= maxGapSeconds) {
+        fuelMl += ((last.fuelMlPerSec + sample.fuelMlPerSec) / 2) * dt;
+        distanceKm +=
+            (((last.distanceSpeedKph + sample.distanceSpeedKph) / 2) * dt) /
+                3600;
+        obdDistanceKm += (((last.speedKph + sample.speedKph) / 2) * dt) / 3600;
+      }
+    }
+    _addCan(sample);
+  }
+
+  void _addCan(TripSample sample) {
+    final raw = sample.canFuelRaw;
+    if (raw == null) return;
+    final lastTime = _lastCanTime;
+    final lastRaw = _lastCanRaw;
+    if (lastTime != null && lastRaw != null) {
+      final dt = sample.timeSeconds - lastTime;
+      if (dt > 0 && dt <= maxCanGapSeconds) {
+        canRawSeconds += (lastRaw + raw) / 2 * dt;
+        canCoveredSeconds += dt;
+        appFuelMlOverCan += fuelMl - _appFuelMlAtLastCan;
+      }
+    }
+    _lastCanTime = sample.timeSeconds;
+    _lastCanRaw = raw;
+    _appFuelMlAtLastCan = fuelMl;
   }
 
   void addAll(Iterable<TripSample> samples) {
@@ -46,5 +88,11 @@ class TripIntegrator {
     obdDistanceKm = 0;
     lastFromGps = false;
     _last = null;
+    canRawSeconds = 0;
+    canCoveredSeconds = 0;
+    appFuelMlOverCan = 0;
+    _lastCanTime = null;
+    _lastCanRaw = null;
+    _appFuelMlAtLastCan = 0;
   }
 }

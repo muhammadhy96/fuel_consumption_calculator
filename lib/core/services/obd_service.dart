@@ -5,6 +5,7 @@ import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:obd2_plugin/obd2_plugin.dart';
 
 import '../constants/obd_pids.dart';
+import '../utils/can_monitor.dart';
 import '../utils/obd_frame_decoder.dart';
 import '../utils/pid_support.dart';
 import 'obd_transport.dart';
@@ -81,6 +82,26 @@ class ObdService {
   /// missing any of them was cut short.
   Map<String, Set<String>> _countedReplyPids = const {};
 
+  /// Read the ECU's own fuel signal ([CanFuelSignal]) from the broadcast CAN
+  /// traffic between PID polls, when the car has it.
+  bool canCaptureEnabled = true;
+
+  /// Called from the poll loop with each captured [CanFuelSignal] frame,
+  /// before [onCycleComplete] of the same cycle.
+  void Function(List<int> frame)? onCanFrame;
+
+  bool _canCaptureActive = false;
+
+  /// False when the adapter was seen passing other IDs while monitoring
+  /// despite `AT CRA`; captures then print IDs and pick ours out.
+  bool _canFilterHonoured = true;
+  int _canWindowMs = _canInitialWindowMs;
+  int _canFailureStreak = 0;
+  int _canCaptures = 0;
+  int _canFailures = 0;
+  int _lastCanCaptureMillis = 0;
+  final Stopwatch _canWatch = Stopwatch();
+
   static const ObdFrameDecoder _decoder = ObdFrameDecoder();
 
   static const int _maxTransientPollErrors = 3;
@@ -96,6 +117,21 @@ class ObdService {
   static const Duration _warmStartTimeout = Duration(seconds: 2);
   static const Duration _protocolTimeout = Duration(seconds: 2);
   static const Duration _pidProbeTimeout = Duration(seconds: 5);
+
+  /// How often the poll loop reads one [CanFuelSignal] frame. Each read costs
+  /// five adapter round trips plus the listening window (~0.3-0.4 s).
+  static const Duration canCaptureInterval = Duration(seconds: 1);
+
+  /// After this many reads in a row without a frame (ECU asleep, ignition
+  /// off), reads drop to one every [_canBackoffInterval].
+  static const int _maxCanFailures = 5;
+  static const Duration _canBackoffInterval = Duration(seconds: 10);
+
+  /// `AT MA` listening window, adapted to catch about one or two frames.
+  static const int _canInitialWindowMs = 300;
+  static const int _canMinWindowMs = 120;
+  static const int _canMaxWindowMs = 1000;
+  static const int _canProbeWindowMs = 600;
 
   /// No reply at all from the adapter for this long means it has hung while
   /// the link stays up; the link is then dropped so the reconnect
@@ -127,6 +163,19 @@ class ObdService {
 
   /// Wall time in milliseconds of the last completed poll cycle.
   int get lastCycleMillis => _lastCycleMillis;
+
+  /// True while the poll loop is reading [CanFuelSignal] frames.
+  bool get canCaptureActive => _canCaptureActive;
+
+  /// False when the adapter ignores its receive filter while monitoring.
+  bool get canFilterHonoured => _canFilterHonoured;
+
+  /// [CanFuelSignal] reads this session that returned a frame / none.
+  int get canCaptures => _canCaptures;
+  int get canFailures => _canFailures;
+
+  /// Wall time in milliseconds of the last [CanFuelSignal] read.
+  int get lastCanCaptureMillis => _lastCanCaptureMillis;
 
   /// Bonded devices only — an inquiry scan costs ~12 s and adds nothing for
   /// an adapter the user already paired.
@@ -268,6 +317,7 @@ class ObdService {
     _responseCounts = const {};
     _countedReplyPids = const {};
     _activeProtocol = null;
+    _resetCanCapture();
 
     String? cachedProtocol;
     if (useCache) {
@@ -358,10 +408,31 @@ class ObdService {
 
     // 10. Response counts, only where the adapter returns complete replies.
     await _calibrateResponseCounts();
+
+    // 11. The ECU's own fuel signal on the broadcast traffic. Only 11-bit CAN
+    //     buses carry it, and only cars that send that ID answer the probe.
+    if (canCaptureEnabled && _isElevenBitCan(_activeProtocol)) {
+      // The first reads print IDs to prove the adapter applies its receive
+      // filter while monitoring; one that does not gets ID-tagged reads.
+      _canCaptureActive = true;
+      List<int>? frame;
+      for (var attempt = 1; attempt <= 3 && _canCaptureActive; attempt++) {
+        frame = await _captureCanFrame(
+          windowMs: _canProbeWindowMs * (attempt == 1 ? 1 : 2),
+          verifyFilter: _canFilterHonoured,
+        );
+        if (frame != null) break;
+      }
+      // Restoring the adapter may already have switched capture off.
+      _canCaptureActive = _canCaptureActive && frame != null;
+      _canFailureStreak = 0;
+    }
     _log(
       'init complete — protocol=${_activeProtocol ?? '?'} '
       'pids=${_pidSupport.supportedPids.length} commands=$_pollCommands '
-      'slow=$_slowPollCommands counts=$_responseCounts',
+      'slow=$_slowPollCommands counts=$_responseCounts '
+      'can=${_canCaptureActive ? CanFuelSignal.canId : 'off'}'
+      '${_canFilterHonoured ? '' : ' (ID-tagged)'}',
     );
   }
 
@@ -451,6 +522,13 @@ class ObdService {
             onDataReceived?.call(response);
           }
           if (!_isPolling || !_connected) break;
+        }
+        if (_isPolling && _connected && _canCaptureDue()) {
+          final frame = await _captureCanFrame();
+          if (frame != null) {
+            adapterSilence.reset();
+            onCanFrame?.call(frame);
+          }
         }
         cycleWatch.stop();
         _lastCycleMillis = cycleWatch.elapsedMilliseconds;
@@ -591,34 +669,241 @@ class ObdService {
   }
 
   /// Writes [command] to the adapter and waits for its prompt-terminated
-  /// response. This is the only place that talks to the transport.
+  /// response, under the command lock.
   ///
   /// Returns `''` on timeout, which also arms a one-shot resync so a late
   /// response can never complete the next command's completer.
   Future<String> _sendCommand(String command, {Duration? timeout}) {
-    return _withCommandLock(() async {
-      final transport = _transport;
-      if (transport == null || !transport.isConnected) {
-        throw StateError('OBD connection lost');
+    return _withCommandLock(() => _sendUnlocked(command, timeout: timeout));
+  }
+
+  /// [_sendCommand] for code that already holds the command lock. Together
+  /// with [_monitorUnlocked] the only place that talks to the transport.
+  Future<String> _sendUnlocked(String command, {Duration? timeout}) async {
+    final transport = _transport;
+    if (transport == null || !transport.isConnected) {
+      throw StateError('OBD connection lost');
+    }
+    final completer = Completer<String>();
+    _pendingResponse = completer;
+    try {
+      await transport.write(command);
+      return await completer.future.timeout(
+        timeout ?? _commandTimeout,
+        onTimeout: () {
+          _onCommandTimeout(command);
+          return '';
+        },
+      );
+    } finally {
+      if (identical(_pendingResponse, completer)) {
+        _pendingResponse = null;
       }
-      final completer = Completer<String>();
-      _pendingResponse = completer;
+    }
+  }
+
+  bool _canCaptureDue() {
+    if (!_canCaptureActive) return false;
+    final interval = _canFailureStreak >= _maxCanFailures
+        ? _canBackoffInterval
+        : canCaptureInterval;
+    if (_canWatch.isRunning && _canWatch.elapsed < interval) return false;
+    _canWatch
+      ..reset()
+      ..start();
+    return true;
+  }
+
+  void _resetCanCapture() {
+    _canCaptureActive = false;
+    _canFilterHonoured = true;
+    _canWindowMs = _canInitialWindowMs;
+    _canFailureStreak = 0;
+    _canWatch
+      ..stop()
+      ..reset();
+  }
+
+  /// Reads one [CanFuelSignal] frame from the broadcast traffic, between PID
+  /// polls, and puts the adapter back exactly as the poll loop needs it.
+  ///
+  /// `AT CAF0` shows the frame's 8 bytes as they are (with formatting on, the
+  /// first byte would be taken for an ISO-TP length byte), `AT CRA` passes only
+  /// that ID, `AT MA` listens for [windowMs] and a raw space stops it.
+  /// `AT AR` and `AT CAF1` then restore the OBD reply filter and formatting.
+  /// The whole sequence holds the command lock, so no PID request can land
+  /// while the filter is set.
+  ///
+  /// With [verifyFilter] the frames are printed with their ID (`AT H1`) to
+  /// prove that only ours come through; if others do, the adapter ignores its
+  /// filter while monitoring and every later read prints IDs and spaces
+  /// (`AT H1`, `AT S1`) so ours can be picked out.
+  ///
+  /// Returns the newest complete frame, or null.
+  Future<List<int>?> _captureCanFrame({
+    int? windowMs,
+    bool verifyFilter = false,
+  }) {
+    return _withCommandLock(() async {
+      final watch = Stopwatch()..start();
+      final tagged = !_canFilterHonoured;
+      final headers = verifyFilter || tagged;
+      var frames = const <List<int>>[];
+      var unsupported = false;
+      var settingsChanged = false;
       try {
-        await transport.write(command);
-        return await completer.future.timeout(
-          timeout ?? _commandTimeout,
-          onTimeout: () {
-            _onCommandTimeout(command);
-            return '';
-          },
+        settingsChanged = true;
+        final caf = await _sendUnlocked('AT CAF0', timeout: _atTimeout);
+        if (!_isOk(caf)) {
+          unsupported = caf.contains('?');
+          return null;
+        }
+        final cra = await _sendUnlocked(
+          'AT CRA ${CanFuelSignal.canId}',
+          timeout: _atTimeout,
         );
+        if (!_isOk(cra)) {
+          unsupported = cra.contains('?');
+          return null;
+        }
+        if (headers &&
+            !_isOk(await _sendUnlocked('AT H1', timeout: _atTimeout))) {
+          return null;
+        }
+        if (tagged &&
+            !_isOk(await _sendUnlocked('AT S1', timeout: _atTimeout))) {
+          return null;
+        }
+        final reply = await _monitorUnlocked(windowMs ?? _canWindowMs);
+        // An adapter without monitor mode answers `?` at once.
+        if (reply.contains('?')) unsupported = true;
+        if (tagged) {
+          frames = parseTaggedFrames(reply, CanFuelSignal.canId);
+        } else if (verifyFilter) {
+          final checked = parseHeaderedFrames(reply, CanFuelSignal.canId);
+          if (checked == null) {
+            _canFilterHonoured = false;
+            _log('CAN capture: adapter ignores AT CRA while monitoring — '
+                'switching to ID-tagged reads');
+          } else {
+            frames = checked;
+          }
+        } else {
+          frames = parseMonitorFrames(reply);
+        }
+        return frames.isEmpty ? null : frames.last;
       } finally {
-        if (identical(_pendingResponse, completer)) {
-          _pendingResponse = null;
+        if (settingsChanged) {
+          await _restoreAfterCapture(headers: headers, spaces: tagged);
+        }
+        watch.stop();
+        _lastCanCaptureMillis = watch.elapsedMilliseconds;
+        _recordCanCapture(frames.length, adapt: windowMs == null);
+        if (unsupported) {
+          _canCaptureActive = false;
+          _log('CAN capture: adapter refused it — off for this session');
         }
       }
     });
   }
+
+  /// Sends `AT MA`, waits [windowMs] and stops the monitor with a raw space.
+  /// Returns everything the adapter printed up to its prompt.
+  Future<String> _monitorUnlocked(int windowMs) async {
+    final transport = _transport;
+    if (transport == null || !transport.isConnected) {
+      throw StateError('OBD connection lost');
+    }
+    final completer = Completer<String>();
+    _pendingResponse = completer;
+    try {
+      await transport.write('AT MA');
+      // The adapter prompts by itself only when monitoring fails (`?`).
+      final early = await Future.any<String?>([
+        completer.future,
+        Future<String?>.delayed(Duration(milliseconds: windowMs)),
+      ]);
+      if (early != null) return early;
+      await transport.writeRaw(' ');
+      const lost = '\u0000';
+      var reply = await completer.future.timeout(
+        _atTimeout,
+        onTimeout: () => lost,
+      );
+      if (reply == lost) {
+        // The stop character went missing: send another.
+        await transport.writeRaw(' ');
+        reply = await completer.future.timeout(
+          _atTimeout,
+          onTimeout: () {
+            _onCommandTimeout('AT MA');
+            return '';
+          },
+        );
+      }
+      return reply;
+    } finally {
+      if (identical(_pendingResponse, completer)) {
+        _pendingResponse = null;
+      }
+    }
+  }
+
+  /// Puts back the OBD reply filter, CAN formatting and, when a read changed
+  /// them, headers and spaces off (as [obdInitPrologue] set them). If any of
+  /// it cannot be confirmed, capture stops for the session so a wrong setting
+  /// can never break the PID polling.
+  Future<void> _restoreAfterCapture({
+    bool headers = false,
+    bool spaces = false,
+  }) async {
+    final transport = _transport;
+    if (transport == null || !transport.isConnected) return;
+    Future<bool> confirm(List<String> commands) async {
+      for (final command in commands) {
+        if (_isOk(await _sendUnlocked(command, timeout: _atTimeout))) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    final filterCleared = await confirm(const ['AT AR', 'AT CRA', 'AT AR']);
+    final formattingOn = await confirm(const ['AT CAF1', 'AT CAF1', 'AT CAF1']);
+    final headersOff =
+        !headers || await confirm(const ['AT H0', 'AT H0', 'AT H0']);
+    final spacesOff = !spaces || await confirm(const ['AT S0', 'AT S0', 'AT S0']);
+    if (!filterCleared || !formattingOn || !headersOff || !spacesOff) {
+      _canCaptureActive = false;
+      _log('CAN capture: adapter settings not confirmed (filter=$filterCleared '
+          'caf=$formattingOn h0=$headersOff s0=$spacesOff) — off for this '
+          'session');
+    }
+  }
+
+  void _recordCanCapture(int frameCount, {required bool adapt}) {
+    if (frameCount > 0) {
+      _canCaptures += 1;
+      _canFailureStreak = 0;
+    } else {
+      _canFailures += 1;
+      _canFailureStreak += 1;
+    }
+    if (!adapt) return;
+    if (frameCount == 0) {
+      _canWindowMs = (_canWindowMs * 2).clamp(_canMinWindowMs, _canMaxWindowMs);
+    } else if (frameCount >= 3) {
+      _canWindowMs =
+          (_canWindowMs * 3 ~/ 4).clamp(_canMinWindowMs, _canMaxWindowMs);
+    }
+  }
+
+  static bool _isOk(String response) =>
+      response.toUpperCase().contains('OK');
+
+  /// ELM327 protocols 6 and 8 are ISO 15765-4 with 11-bit IDs.
+  static bool _isElevenBitCan(String? protocol) =>
+      protocol == '6' || protocol == '8';
 
   void _onCommandTimeout(String command) {
     _consecutiveTimeouts += 1;
@@ -680,6 +965,7 @@ class ObdService {
     _slowPollCommandPids = const [];
     _responseCounts = const {};
     _countedReplyPids = const {};
+    _resetCanCapture();
     _completePendingResponse();
     if (notify && wasConnected) {
       onDisconnected?.call();

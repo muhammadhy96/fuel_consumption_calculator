@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/theme/app_theme.dart';
+import '../../core/utils/can_monitor.dart';
 import '../../core/utils/formatters.dart';
 import '../../core/utils/trip_cost.dart';
 import '../../models/car_profile.dart';
@@ -38,6 +39,8 @@ class LiveDashboard extends StatelessWidget {
         _GaugeRow(),
         const SizedBox(height: 14),
         _FuelFlowHero(fuelFlow: fuelFlow, tripStats: tripStats),
+        const SizedBox(height: 14),
+        _CanFuelCard(appFuelFlow: fuelFlow),
         const SizedBox(height: 14),
         _MetricGrid(),
         const SizedBox(height: 14),
@@ -574,6 +577,148 @@ class _MetricGrid extends StatelessWidget {
       },
     );
   }
+}
+
+/// The ECU's own fuel signal read from CAN, next to the app's PID estimate,
+/// live and over the trip.
+class _CanFuelCard extends StatelessWidget {
+  const _CanFuelCard({required this.appFuelFlow});
+
+  /// The app's smoothed fuel flow, mL/s.
+  final double appFuelFlow;
+
+  @override
+  Widget build(BuildContext context) {
+    return Consumer2<ObdProvider, TripProvider>(
+      builder: (context, obd, trip, _) {
+        if (!obd.connected) return const SizedBox.shrink();
+        final muted = TextStyle(
+          color: Colors.white.withValues(alpha: 0.55),
+          fontSize: 11,
+        );
+        final header = Row(
+          children: [
+            const Icon(Icons.memory, color: AppTheme.accentAmber, size: 16),
+            const SizedBox(width: 8),
+            Text(
+              'ECU FUEL · CAN 0x${CanFuelSignal.canId}',
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.7),
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.5,
+              ),
+            ),
+            const Spacer(),
+            Text(
+              obd.canCaptureActive
+                  ? '${obd.canCaptures} reads · ${obd.canFailures} missed · '
+                      '${obd.lastCanCaptureMillis} ms'
+                  : 'off',
+              style: muted,
+            ),
+          ],
+        );
+        if (!obd.canCaptureActive) {
+          return _card(Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              header,
+              const SizedBox(height: 8),
+              Text(
+                obd.live || obd.canCaptures + obd.canFailures > 0
+                    ? 'No 0x${CanFuelSignal.canId} frames from this car or '
+                        'adapter. Trips are recorded without the ECU value.'
+                    : 'Checked when the adapter connects.',
+                style: muted,
+              ),
+            ],
+          ));
+        }
+        final raw = obd.canFuelRaw;
+        final canLph = raw == null ? null : raw * CanFuelSignal.lphPerCount;
+        final covered = trip.canCoveredSeconds;
+        final canL = trip.canFuelMl / 1000;
+        final appL = trip.appFuelMlOverCan / 1000;
+        return _card(Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            header,
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: _TripStatCell(
+                    label: 'ECU raw',
+                    value: raw?.toString() ?? '--',
+                    unit: '',
+                  ),
+                ),
+                Expanded(
+                  child: _TripStatCell(
+                    label: 'ECU ≈ L/h',
+                    value: canLph?.toStringAsFixed(2) ?? '--',
+                    unit: '',
+                  ),
+                ),
+                Expanded(
+                  child: _TripStatCell(
+                    label: 'App L/h',
+                    value: (appFuelFlow * 3.6).toStringAsFixed(2),
+                    unit: '',
+                  ),
+                ),
+              ],
+            ),
+            if (trip.running && covered > 0) ...[
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: _TripStatCell(
+                      label: 'Trip · ECU ≈',
+                      value: canL.toStringAsFixed(3),
+                      unit: 'L',
+                    ),
+                  ),
+                  Expanded(
+                    child: _TripStatCell(
+                      label: 'Trip · App',
+                      value: appL.toStringAsFixed(3),
+                      unit: 'L',
+                    ),
+                  ),
+                  Expanded(
+                    child: _TripStatCell(
+                      label: 'App / ECU',
+                      value: canL > 0 ? (appL / canL).toStringAsFixed(2) : '--',
+                      unit: '',
+                    ),
+                  ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 8),
+            Text(
+              'ECU litres use an estimated ${CanFuelSignal.lphPerCount} L/h '
+              'per count; the CSV keeps the raw value.',
+              style: muted,
+            ),
+          ],
+        ));
+      },
+    );
+  }
+
+  static Widget _card(Widget child) => Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: AppTheme.surfaceDarkElevated,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: AppTheme.surfaceDarkOutline),
+        ),
+        child: child,
+      );
 }
 
 class _TripStatsCard extends StatelessWidget {

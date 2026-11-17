@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/formatters.dart';
+import '../../core/utils/trip_integrator.dart';
 import '../../models/car_profile.dart';
 import '../../models/trip.dart';
 import '../../models/trip_sample.dart';
@@ -23,6 +24,10 @@ class TripSummaryPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // The ECU's own fuel (CAN), when this trip read it.
+    final can = samples.any((s) => s.canFuelRaw != null)
+        ? (TripIntegrator()..addAll(samples))
+        : null;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Trip Summary'),
@@ -63,6 +68,20 @@ class TripSummaryPage extends StatelessWidget {
                   'Avg flow',
                   '${trip.avgFuelMlPerSec.toStringAsFixed(2)} mL/s',
                 ),
+                if (can != null && can.canCoveredSeconds > 0) ...[
+                  _StatEntry('ECU fuel (CAN est.)', formatFuel(can.canFuelMl)),
+                  _StatEntry(
+                    'App fuel, same span',
+                    formatFuel(can.appFuelMlOverCan),
+                  ),
+                  _StatEntry(
+                    'App / ECU',
+                    can.canFuelMl > 0
+                        ? (can.appFuelMlOverCan / can.canFuelMl)
+                            .toStringAsFixed(2)
+                        : '--',
+                  ),
+                ],
                 if (trip.totalCost != null) ...[
                   _StatEntry('Fuel cost', formatCost(trip.fuelCost!)),
                   // C_trip needs k_m and k_t; without them it is unknown.

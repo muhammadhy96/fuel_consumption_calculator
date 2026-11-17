@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/formatters.dart';
+import '../../core/utils/trip_integrator.dart';
 import '../../models/trip.dart';
 import '../../models/trip_sample.dart';
 import '../../state/trip_provider.dart';
@@ -32,6 +33,9 @@ class _TripDetailsPageState extends State<TripDetailsPage> {
   String? _error;
   List<TripSample> _samples = [];
 
+  /// Totals recomputed from the CSV, for the ECU (CAN) comparison.
+  TripIntegrator? _canTotals;
+
   @override
   void initState() {
     super.initState();
@@ -50,8 +54,10 @@ class _TripDetailsPageState extends State<TripDetailsPage> {
     try {
       final samples = await context.read<TripProvider>().loadSamples(path);
       if (!mounted) return;
+      final hasCan = samples.any((s) => s.canFuelRaw != null);
       setState(() {
         _samples = samples;
+        _canTotals = hasCan ? (TripIntegrator()..addAll(samples)) : null;
         _loading = false;
       });
     } catch (_) {
@@ -137,6 +143,26 @@ class _TripDetailsPageState extends State<TripDetailsPage> {
                     label: 'Avg flow',
                     value:
                         '${trip.avgFuelMlPerSec.toStringAsFixed(2)} mL/s'),
+                if (_canTotals case final can?
+                    when can.canCoveredSeconds > 0) ...[
+                  _StatCell(
+                      label: 'ECU fuel (CAN est.)',
+                      value: formatFuel(can.canFuelMl)),
+                  _StatCell(
+                      label: 'App fuel, same span',
+                      value: formatFuel(can.appFuelMlOverCan)),
+                  _StatCell(
+                      label: 'App / ECU',
+                      value: can.canFuelMl > 0
+                          ? (can.appFuelMlOverCan / can.canFuelMl)
+                              .toStringAsFixed(2)
+                          : '--'),
+                  _StatCell(
+                      label: 'CAN coverage',
+                      value: trip.durationSeconds > 0
+                          ? '${(can.canCoveredSeconds / trip.durationSeconds * 100).clamp(0, 100).toStringAsFixed(0)} %'
+                          : '--'),
+                ],
                 if (trip.totalCost != null) ...[
                   _StatCell(
                       label: 'Fuel cost', value: formatCost(trip.fuelCost!)),

@@ -67,6 +67,12 @@ class TripProvider extends ChangeNotifier {
   double get totalFuelMl => _totals.fuelMl;
   double get distanceKm => _totals.distanceKm;
 
+  /// The ECU's own fuel (CAN, estimated scale) over the trip so far, the
+  /// stretch of trip it covers, and the app's fuel over that same stretch.
+  double get canFuelMl => _totals.canFuelMl;
+  double get canCoveredSeconds => _totals.canCoveredSeconds;
+  double get appFuelMlOverCan => _totals.appFuelMlOverCan;
+
   /// Whether the latest sample's distance came from GPS rather than OBD speed.
   bool get distanceFromGps => _running && _totals.lastFromGps;
 

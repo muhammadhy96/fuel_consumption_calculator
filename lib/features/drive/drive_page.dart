@@ -10,6 +10,7 @@ import 'package:provider/provider.dart';
 import '../../core/services/gps_speed_service.dart';
 import '../../core/services/obd_transport.dart';
 import '../../core/services/trip_foreground_service.dart';
+import '../../core/utils/can_monitor.dart';
 import '../../core/theme/app_theme.dart';
 import '../../features/drive/confirm_profile_sheet.dart';
 import '../../features/drive/connect_button.dart';
@@ -454,6 +455,7 @@ class _DrivePageState extends State<DrivePage> {
     final fuel = rawFuel.isFinite && rawFuel >= 0 ? rawFuel : 0.0;
     _timeSeconds = _sampleStopwatch.elapsedMilliseconds / 1000.0;
     final smoothFuel = obd.pushFuelSample(fuel);
+    final canFrame = obd.takeCanFrame();
 
     final sample = TripSample(
       timeSeconds: _timeSeconds,
@@ -470,6 +472,8 @@ class _DrivePageState extends State<DrivePage> {
       absoluteLoadPercent: obd.absoluteLoadPercent ?? 0,
       gpsSpeedKph: _gps.speedKph,
       gpsSpeedAccuracyKph: _gps.speedAccuracyKph,
+      canFuelRaw: canFrame?[CanFuelSignal.fuelByte],
+      canFrameHex: canFrame == null ? null : canFrameHex(canFrame),
     );
     trip.addSample(sample);
 
