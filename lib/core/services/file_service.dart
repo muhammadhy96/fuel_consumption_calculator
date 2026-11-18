@@ -37,6 +37,9 @@ const List<String> _tripCsvHeader = [
   'GPS Speed Accuracy (km/h)',
   'CAN 545 Fuel (raw)',
   'CAN 545 Frame',
+  'CAN 545 Fuel (mL/s)',
+  'CAN 545 Frames in Window',
+  'CAN Window (ms)',
 ];
 
 const String _legacyEngineLoadHeader = 'Engine Load (%)';

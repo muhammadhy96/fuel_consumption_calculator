@@ -1,27 +1,68 @@
 /// The ECU's own fuel signal, read from the broadcast CAN traffic.
 ///
 /// On the Kia Rio 2011 powertrain bus (ISO 15765, 11-bit 500 kbit/s) ID 0x545
-/// byte 1 is the engine ECU's fuel flow: 0 during overrun fuel cut, ~17-26 at
-/// warm idle, up to ~230 under hard acceleration. It tracks engine torque x RPM
-/// (r = 0.99), so it is a rate. Its unit is not published; [lphPerCount] is an
-/// estimate (engine physics and warm idle against the PID speed-density model
-/// both give ~0.036-0.042 L/h per count).
+/// bytes 1-2 (16-bit little-endian) are `FCO`, the engine ECU's fuel
+/// consumption: 0 during overrun fuel cut, ~17-26 at warm idle, past 255
+/// (byte 2 = 1) at full load. The opendbc file `hyundai_i30_2014.dbc`
+/// (reverse-engineered, not a factory document) defines it as 0.128 uL per
+/// count; the later `EMS14` layout moved it to ID 0x200.
 ///
-/// The raw byte is what gets recorded, so any later calibration applies to old
-/// trips too.
+/// A count is the fuel injected during one message period. 0x545 is sent once
+/// per cycle of the 10 ms powertrain messages (one 0x545 per 0x316 in 98.6% of
+/// a recording), so 0.128 uL / 10 ms = [mlPerSecPerCount]. The period is
+/// measured live from the frames per capture window ([ObdService]
+/// `canFramePeriodMs`) and logged with each read to confirm it.
+///
+/// The raw value and the whole frame are recorded, so any later calibration
+/// applies to old trips too.
 class CanFuelSignal {
   const CanFuelSignal._();
 
   /// 11-bit CAN ID, as `AT CRA` takes it.
   static const String canId = '545';
 
-  /// Index of the fuel byte in the 8-byte frame.
+  /// Index of the fuel value's low byte in the 8-byte frame; the high byte
+  /// follows it.
   static const int fuelByte = 1;
 
-  /// Estimated L/h per raw count. Display only; the CSV keeps the raw value.
-  static const double lphPerCount = 0.036;
+  /// The raw fuel count of a 0x545 frame: `byte1 + 256 * byte2`, or null when
+  /// the frame is too short.
+  static int? rawFromFrame(List<int> frame) => frame.length > fuelByte + 1
+      ? frame[fuelByte] | (frame[fuelByte + 1] << 8)
+      : null;
 
-  static double mlPerSecFromRaw(num raw) => raw * lphPerCount / 3.6;
+  /// [rawFromFrame] of a frame stored as hex (`8C 12 01 89 ...`), or null.
+  static int? rawFromHex(String? hex) {
+    if (hex == null) return null;
+    final bytes = <int>[];
+    for (final part in hex.trim().split(RegExp(r'\s+'))) {
+      final b = part.length == 2 ? int.tryParse(part, radix: 16) : null;
+      if (b == null) return null;
+      bytes.add(b);
+    }
+    return rawFromFrame(bytes);
+  }
+
+  /// Fuel per count, from the DBC.
+  static const double microLitresPerCount = 0.128;
+
+  /// Assumed 0x545 message period; see [CanFuelSignal].
+  static const double framePeriodMs = 10;
+
+  /// mL/s per raw count: uL per ms is mL per s, so 0.128 / 10 = 0.0128.
+  static const double mlPerSecPerCount = microLitresPerCount / framePeriodMs;
+
+  static double mlPerSecFromRaw(num raw) => raw * mlPerSecPerCount;
+}
+
+/// One [CanFuelSignal] read: the newest frame, how many frames the adapter
+/// printed and how long it listened for them.
+class CanRead {
+  const CanRead(this.frame, {this.frameCount, this.listenMs});
+
+  final List<int> frame;
+  final int? frameCount;
+  final int? listenMs;
 }
 
 /// Splits the reply to `AT MA` into 8-byte CAN frames.

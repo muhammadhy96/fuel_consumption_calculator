@@ -636,7 +636,8 @@ class _CanFuelCard extends StatelessWidget {
           ));
         }
         final raw = obd.canFuelRaw;
-        final canLph = raw == null ? null : raw * CanFuelSignal.lphPerCount;
+        final canMlPerSec = obd.canFuelMlPerSec;
+        final period = obd.canFramePeriodMs;
         final covered = trip.canCoveredSeconds;
         final canL = trip.canFuelMl / 1000;
         final appL = trip.appFuelMlOverCan / 1000;
@@ -656,15 +657,15 @@ class _CanFuelCard extends StatelessWidget {
                 ),
                 Expanded(
                   child: _TripStatCell(
-                    label: 'ECU ≈ L/h',
-                    value: canLph?.toStringAsFixed(2) ?? '--',
+                    label: 'ECU mL/s',
+                    value: canMlPerSec?.toStringAsFixed(2) ?? '--',
                     unit: '',
                   ),
                 ),
                 Expanded(
                   child: _TripStatCell(
-                    label: 'App L/h',
-                    value: (appFuelFlow * 3.6).toStringAsFixed(2),
+                    label: 'App mL/s',
+                    value: appFuelFlow.toStringAsFixed(2),
                     unit: '',
                   ),
                 ),
@@ -700,8 +701,12 @@ class _CanFuelCard extends StatelessWidget {
             ],
             const SizedBox(height: 8),
             Text(
-              'ECU litres use an estimated ${CanFuelSignal.lphPerCount} L/h '
-              'per count; the CSV keeps the raw value.',
+              'ECU fuel = raw × ${CanFuelSignal.mlPerSecPerCount} mL/s '
+              '(${CanFuelSignal.microLitresPerCount} µL per '
+              '${CanFuelSignal.framePeriodMs.toStringAsFixed(0)} ms frame). '
+              'Measured 0x${CanFuelSignal.canId} period: '
+              '${period == null ? 'counting…' : '${period.toStringAsFixed(1)} ms'}'
+              '. The CSV keeps the raw value.',
               style: muted,
             ),
           ],

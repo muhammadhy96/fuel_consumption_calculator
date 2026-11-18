@@ -87,7 +87,69 @@ void main() {
     });
   });
 
+  group('CanFuelSignal', () {
+    test('reads bytes 1-2 as one little-endian count', () {
+      expect(CanFuelSignal.rawFromFrame([0xAC, 0x1F, 0x00, 0x8A, 0, 0, 0, 0]),
+          31);
+      // Full load: past 255 the high byte is 1 (the byte-1 build logged 18).
+      expect(CanFuelSignal.rawFromFrame([0x8C, 0x12, 0x01, 0x89, 0, 0, 0, 0]),
+          274);
+      expect(CanFuelSignal.rawFromFrame([0x8C, 0x12]), isNull);
+      expect(CanFuelSignal.rawFromHex('8C 12 01 89 2B 03 2B 03'), 274);
+      expect(CanFuelSignal.rawFromHex('8C 12'), isNull);
+      expect(CanFuelSignal.rawFromHex('ZZ 12 01'), isNull);
+      expect(CanFuelSignal.rawFromHex(null), isNull);
+    });
+  });
+
   group('TripSample CSV', () {
+    test('writes the ECU fuel in mL/s and the capture window', () {
+      final s = TripSample(
+        timeSeconds: 1.5,
+        rpm: 900,
+        mapKpa: 30,
+        speedKph: 12,
+        iatKelvin: 300,
+        fuelMlPerSec: 0.2,
+        mafGramsPerSec: 0,
+        equivRatio: 1,
+        canFuelRaw: 274,
+        canFrameHex: '8C 12 01 89 2B 03 2B 03',
+        canFrameCount: 12,
+        canListenMs: 123,
+      );
+      final row = s.toCsvRow();
+      expect(row.length, TripSample.csvColumnCount);
+      expect(row[16] as double, closeTo(274 * 0.0128, 1e-9));
+      final back = TripSample.fromCsvRow(row);
+      expect(back.canFuelRaw, 274);
+      expect(back.canFrameCount, 12);
+      expect(back.canListenMs, 123);
+      expect(back.canFuelMlPerSec, closeTo(3.5072, 1e-9));
+      // A 16-column row from the previous build has no window columns.
+      final old = TripSample.fromCsvRow(row.sublist(0, 16));
+      expect(old.canFuelRaw, 274);
+      expect(old.canFrameCount, isNull);
+      expect(old.canListenMs, isNull);
+      // A cycle without a CAN read writes null cells.
+      final none = TripSample.fromCsvRow([
+        ...row.sublist(0, 14),
+        for (var i = 14; i < TripSample.csvColumnCount; i++) 'null',
+      ]);
+      expect(none.canFuelRaw, isNull);
+      expect(none.canFuelMlPerSec, isNull);
+      expect(none.canFrameCount, isNull);
+    });
+
+    test('decodes the count again from the stored frame', () {
+      final row = _sample(3.0, 3.3, can: 18).toCsvRow();
+      row[15] = '8C 12 01 89 2B 03 2B 03';
+      // Recorded by the byte-1 build: raw column 18, the frame says 274.
+      expect(TripSample.fromCsvRow(row).canFuelRaw, 274);
+      row[15] = 'null';
+      expect(TripSample.fromCsvRow(row).canFuelRaw, 18);
+    });
+
     test('round-trips the CAN columns and reads older layouts', () {
       final s = TripSample(
         timeSeconds: 1.5,
@@ -135,8 +197,30 @@ void main() {
       expect(totals.canRawSeconds, closeTo(50, 1e-9));
       expect(totals.canCoveredSeconds, closeTo(2, 1e-9));
       expect(totals.appFuelMlOverCan, closeTo(0.4, 1e-9));
-      expect(totals.canFuelMl,
-          closeTo(50 * CanFuelSignal.lphPerCount / 3.6, 1e-9));
+      // 0.128 uL per 10 ms frame = 0.0128 mL/s per count.
+      expect(CanFuelSignal.mlPerSecPerCount, closeTo(0.0128, 1e-12));
+      expect(totals.canFuelMl, closeTo(50 * 0.0128, 1e-9));
+      // No frame counts logged: no period.
+      expect(totals.canFramePeriodMs, isNull);
+    });
+
+    test('measures the message period from frames per window', () {
+      TripSample read(double t, int frames, int ms) => TripSample(
+            timeSeconds: t,
+            rpm: 800,
+            mapKpa: 35,
+            speedKph: 0,
+            iatKelvin: 300,
+            fuelMlPerSec: 0.2,
+            mafGramsPerSec: 0,
+            equivRatio: 1,
+            canFuelRaw: 20,
+            canFrameCount: frames,
+            canListenMs: ms,
+          );
+      final totals = TripIntegrator()
+        ..addAll([read(0, 12, 125), read(1, 12, 121), read(2, 30, 302)]);
+      expect(totals.canFramePeriodMs, closeTo(548 / 54, 1e-9));
     });
   });
 
@@ -178,9 +262,10 @@ void main() {
         expect(f[0], 0x8C);
         expect(f[3], 0x89);
       }
-      // Newest frame of each read: the fuel byte only ever counts up.
+      // Newest frame of each read: the fuel count only ever counts up.
       for (var i = 1; i < frames.length; i++) {
-        expect(frames[i][1], greaterThan(frames[i - 1][1]));
+        expect(CanFuelSignal.rawFromFrame(frames[i]),
+            greaterThan(CanFuelSignal.rawFromFrame(frames[i - 1])!));
       }
       // The adapter is back to OBD settings and no request hit the filter.
       expect(elm.pidRequestsWhileFiltered, 0);
@@ -197,6 +282,22 @@ void main() {
           .whereType<double>();
       expect(rpm, isNotEmpty);
       expect(rpm.first, 720);
+    });
+
+    test('measures the 0x545 period from the frames in each window', () async {
+      elm.frameInterval = const Duration(milliseconds: 50);
+      await connect();
+      expect(service.canCaptureActive, isTrue);
+      final replies = <String>[];
+      await service.startListening(replies.add);
+      await Future<void>.delayed(const Duration(milliseconds: 3000));
+      await service.stopListening();
+
+      expect(service.lastCanFrameCount, greaterThan(1));
+      expect(service.lastCanListenMs, greaterThanOrEqualTo(100));
+      // Timer resolution on the test host makes the fake's 50 ms inexact.
+      expect(service.canFramePeriodMs, isNotNull);
+      expect(service.canFramePeriodMs!, inInclusiveRange(30.0, 90.0));
     });
 
     test('picks 0x545 out of an adapter that ignores its monitor filter',

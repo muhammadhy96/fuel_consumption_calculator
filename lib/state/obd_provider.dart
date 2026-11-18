@@ -64,9 +64,9 @@ class ObdProvider extends ChangeNotifier {
   List<int>? canFrame;
   int? _canFrameAtMs;
 
-  /// Captured since the last [takeCanFrame], so each frame lands in exactly
+  /// Captured since the last [takeCanRead], so each read lands in exactly
   /// one trip sample.
-  List<int>? _pendingCanFrame;
+  CanRead? _pendingCanRead;
   DateTime? _lastLogTime;
   bool _disposed = false;
   bool _fuelRateProbed = false;
@@ -119,14 +119,14 @@ class ObdProvider extends ChangeNotifier {
   int get canFailures => _obdService.canFailures;
   int get lastCanCaptureMillis => _obdService.lastCanCaptureMillis;
 
-  /// Raw [CanFuelSignal] byte of the latest frame, null when none was read
+  /// Raw [CanFuelSignal] count of the latest frame, null when none was read
   /// within [freshnessWindowMs].
   int? get canFuelRaw {
     final frame = canFrame;
     final at = _canFrameAtMs;
     if (frame == null || at == null) return null;
     if (_clock.elapsedMilliseconds - at > freshnessWindowMs) return null;
-    return frame[CanFuelSignal.fuelByte];
+    return CanFuelSignal.rawFromFrame(frame);
   }
 
   /// [canFuelRaw] at the estimated scale, mL/s.
@@ -135,13 +135,16 @@ class ObdProvider extends ChangeNotifier {
     return raw == null ? null : CanFuelSignal.mlPerSecFromRaw(raw);
   }
 
-  /// The frame captured since the previous call, or null. Trip sampling takes
-  /// it so the CSV holds each frame once, in the row of the cycle that read it.
-  List<int>? takeCanFrame() {
-    final frame = _pendingCanFrame;
-    _pendingCanFrame = null;
-    return frame;
+  /// The read captured since the previous call, or null. Trip sampling takes
+  /// it so the CSV holds each read once, in the row of the cycle that read it.
+  CanRead? takeCanRead() {
+    final read = _pendingCanRead;
+    _pendingCanRead = null;
+    return read;
   }
+
+  /// [CanFuelSignal] bus period measured this session, ms.
+  double? get canFramePeriodMs => _obdService.canFramePeriodMs;
 
   double get smoothedFuelMlPerSec {
     if (_smoothFuelWindow.isEmpty) return 0;
@@ -368,10 +371,14 @@ class ObdProvider extends ChangeNotifier {
   }
 
   void _handleCanFrame(List<int> frame) {
-    if (_disposed || frame.length <= CanFuelSignal.fuelByte) return;
+    if (_disposed || CanFuelSignal.rawFromFrame(frame) == null) return;
     canFrame = frame;
     _canFrameAtMs = _clock.elapsedMilliseconds;
-    _pendingCanFrame = frame;
+    _pendingCanRead = CanRead(
+      frame,
+      frameCount: _obdService.lastCanFrameCount,
+      listenMs: _obdService.lastCanListenMs,
+    );
   }
 
   void _learnClosedThrottle() {
@@ -513,7 +520,7 @@ class ObdProvider extends ChangeNotifier {
     _decodedAtMs.clear();
     canFrame = null;
     _canFrameAtMs = null;
-    _pendingCanFrame = null;
+    _pendingCanRead = null;
     _smoothFuelWindow.clear();
     _smoothFuelSum = 0;
     _framesDecoded = 0;

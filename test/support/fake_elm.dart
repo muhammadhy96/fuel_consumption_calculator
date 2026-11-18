@@ -50,7 +50,8 @@ class FakeElm {
   int monitorSessions = 0;
   final List<String> commands = [];
 
-  /// Fuel byte of the next 0x545 frame; counts up so tests can check order.
+  /// Fuel count (bytes 1-2, little-endian) of the next 0x545 frame; counts
+  /// up so tests can check order.
   int fuelRaw = 20;
 
   Timer? _monitorTimer;
@@ -147,7 +148,7 @@ class FakeElm {
         if (!sends545 || (cra != null && cra != '545' && !leaksOtherIds)) {
           return;
         }
-        final frame = [0x8C, fuelRaw & 0xFF, 0x00, 0x89, 0x2B, 0x03, 0x2B, 0x03];
+        final frame = [0x8C, fuelRaw & 0xFF, fuelRaw >> 8, 0x89, 0x2B, 0x03, 0x2B, 0x03];
         fuelRaw += 1;
         _write(line('545', frame));
         if (leaksOtherIds) {

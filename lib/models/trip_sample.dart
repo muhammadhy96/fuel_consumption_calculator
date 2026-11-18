@@ -1,3 +1,5 @@
+import '../core/utils/can_monitor.dart';
+
 class TripSample {
   TripSample({
     required this.timeSeconds,
@@ -16,6 +18,8 @@ class TripSample {
     this.gpsSpeedAccuracyKph,
     this.canFuelRaw,
     this.canFrameHex,
+    this.canFrameCount,
+    this.canListenMs,
   });
 
   final double timeSeconds;
@@ -39,13 +43,22 @@ class TripSample {
   /// 1-σ accuracy of [gpsSpeedKph], or null when the phone does not report it.
   final double? gpsSpeedAccuracyKph;
 
-  /// Raw ECU fuel byte ([CanFuelSignal]) read from CAN during this sample's
+  /// Raw ECU fuel count ([CanFuelSignal], bytes 1-2) read from CAN during this sample's
   /// poll cycle, or null when none was read in it (reads run about once a
   /// second, the poll cycle faster).
   final int? canFuelRaw;
 
   /// The whole 8-byte frame [canFuelRaw] came from, e.g. `8C A6 00 89 ...`.
   final String? canFrameHex;
+
+  /// Frames the read's `AT MA` window printed, and how long it listened (ms):
+  /// together they measure the message period.
+  final int? canFrameCount;
+  final int? canListenMs;
+
+  /// [canFuelRaw] at the [CanFuelSignal] scale, mL/s.
+  double? get canFuelMlPerSec =>
+      canFuelRaw == null ? null : CanFuelSignal.mlPerSecFromRaw(canFuelRaw!);
 
   /// The speed the trip distance is integrated from.
   ///
@@ -60,7 +73,7 @@ class TripSample {
   }
 
   /// Column count of the layout [toCsvRow] writes.
-  static const int csvColumnCount = 16;
+  static const int csvColumnCount = 19;
 
   List<dynamic> toCsvRow() => [
         timeSeconds,
@@ -81,23 +94,29 @@ class TripSample {
         // Blank cells in cycles without a CAN read.
         canFuelRaw,
         canFrameHex,
+        canFuelMlPerSec,
+        canFrameCount,
+        canListenMs,
       ];
 
   /// Reads a row of any layout the app has written.
   ///
-  /// Current layout, 16 columns:
+  /// Current layout, 19 columns:
   ///   time, RPM, MAP, speed, IAT, fuel, MAF, λ, STFT, LTFT, 0103, abs load,
-  ///   GPS speed, GPS speed accuracy, CAN fuel raw, CAN frame
+  ///   GPS speed, GPS speed accuracy, CAN fuel raw, CAN frame, CAN fuel mL/s,
+  ///   CAN frames in window, CAN window ms
   ///
-  /// The same layout without the two CAN columns (14), and without the two
-  /// GPS columns too (12), came before it. Earlier
+  /// The CAN mL/s column is read back from the raw count, so a new scale
+  /// applies to old trips. The same layout without the last three columns
+  /// (16), without the CAN columns (14), and without the GPS columns too (12),
+  /// came before it. Earlier
   /// layouts logged calculated engine load (0104) at index 6, shifting
   /// everything after it by one, and grew by appending columns: 5 (no speed),
   /// 6, 9 (to λ), 11 (+ trims), 12 (+ 0103) and 13 (+ abs load).
   ///
   /// 12 columns is both a current-layout row without GPS and a legacy one; the
-  /// file header settles it through [hasEngineLoadColumn]. Without it, 12 and
-  /// 14 columns are read as the current layout. Rows under 9 columns predate
+  /// file header settles it through [hasEngineLoadColumn]. Without it, 12, 14
+  /// and 16 columns are read as the current layout. Rows under 9 columns predate
   /// engine load and share the current layout's first six columns, so they
   /// always parse.
   factory TripSample.fromCsvRow(
@@ -105,7 +124,7 @@ class TripSample {
     bool? hasEngineLoadColumn,
   }) {
     final isCurrentLayout = hasEngineLoadColumn == null
-        ? row.length == 12 || row.length == 14 || row.length == csvColumnCount
+        ? const {12, 14, 16, csvColumnCount}.contains(row.length)
         : !hasEngineLoadColumn && row.length >= 9;
     return isCurrentLayout
         ? TripSample._fromCurrentRow(row)
@@ -128,9 +147,21 @@ class TripSample {
       absoluteLoadPercent: _num(row[11]),
       gpsSpeedKph: row.length > 12 ? _numOrNull(row[12]) : null,
       gpsSpeedAccuracyKph: row.length > 13 ? _numOrNull(row[13]) : null,
-      canFuelRaw: row.length > 14 ? _numOrNull(row[14])?.toInt() : null,
+      canFuelRaw: _canRaw(row),
       canFrameHex: row.length > 15 ? _textOrNull(row[15]) : null,
+      canFrameCount: row.length > 17 ? _numOrNull(row[17])?.toInt() : null,
+      canListenMs: row.length > 18 ? _numOrNull(row[18])?.toInt() : null,
     );
+  }
+
+  /// The CAN fuel count, decoded again from the stored frame when there is
+  /// one: trips recorded before the count was read as 16 bits stored only its
+  /// low byte (18 for 274 at full load) in the raw column.
+  static int? _canRaw(List<dynamic> row) {
+    final fromFrame =
+        row.length > 15 ? CanFuelSignal.rawFromHex(_textOrNull(row[15])) : null;
+    if (fromFrame != null) return fromFrame;
+    return row.length > 14 ? _numOrNull(row[14])?.toInt() : null;
   }
 
   /// Layouts that carried engine load at index 6. The value is skipped.

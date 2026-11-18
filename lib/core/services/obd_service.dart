@@ -102,6 +102,15 @@ class ObdService {
   int _lastCanCaptureMillis = 0;
   final Stopwatch _canWatch = Stopwatch();
 
+  /// Frames the last read printed and how long it listened for them.
+  int _lastCanFrameCount = 0;
+  int _lastCanListenMs = 0;
+
+  /// Session totals of [_lastCanFrameCount] / [_lastCanListenMs] over reads
+  /// with the filter honoured, for [canFramePeriodMs].
+  int _canPeriodFrames = 0;
+  int _canPeriodListenMs = 0;
+
   static const ObdFrameDecoder _decoder = ObdFrameDecoder();
 
   static const int _maxTransientPollErrors = 3;
@@ -176,6 +185,18 @@ class ObdService {
 
   /// Wall time in milliseconds of the last [CanFuelSignal] read.
   int get lastCanCaptureMillis => _lastCanCaptureMillis;
+
+  /// [CanFuelSignal] frames printed by the last read, and how many
+  /// milliseconds it listened (from sending `AT MA` to the stop character).
+  int get lastCanFrameCount => _lastCanFrameCount;
+  int get lastCanListenMs => _lastCanListenMs;
+
+  /// The bus period of [CanFuelSignal] measured this session: listening time
+  /// over frames received, null until 20 frames were counted. With the
+  /// receive filter only our ID is printed, so the adapter cannot overflow and
+  /// every frame sent in the window is counted.
+  double? get canFramePeriodMs =>
+      _canPeriodFrames < 20 ? null : _canPeriodListenMs / _canPeriodFrames;
 
   /// Bonded devices only — an inquiry scan costs ~12 s and adds nothing for
   /// an adapter the user already paired.
@@ -749,6 +770,7 @@ class ObdService {
       final tagged = !_canFilterHonoured;
       final headers = verifyFilter || tagged;
       var frames = const <List<int>>[];
+      var listenMs = 0;
       var unsupported = false;
       var settingsChanged = false;
       try {
@@ -774,7 +796,12 @@ class ObdService {
             !_isOk(await _sendUnlocked('AT S1', timeout: _atTimeout))) {
           return null;
         }
-        final reply = await _monitorUnlocked(windowMs ?? _canWindowMs);
+        final listen = Stopwatch();
+        final reply = await _monitorUnlocked(
+          windowMs ?? _canWindowMs,
+          listening: listen,
+        );
+        listenMs = listen.elapsedMilliseconds;
         // An adapter without monitor mode answers `?` at once.
         if (reply.contains('?')) unsupported = true;
         if (tagged) {
@@ -799,6 +826,13 @@ class ObdService {
         watch.stop();
         _lastCanCaptureMillis = watch.elapsedMilliseconds;
         _recordCanCapture(frames.length, adapt: windowMs == null);
+        _lastCanFrameCount = frames.length;
+        _lastCanListenMs = listenMs;
+        // Tagged reads also print other IDs and can overflow: not counted.
+        if (frames.isNotEmpty && listenMs > 0 && !tagged) {
+          _canPeriodFrames += frames.length;
+          _canPeriodListenMs += listenMs;
+        }
         if (unsupported) {
           _canCaptureActive = false;
           _log('CAN capture: adapter refused it — off for this session');
@@ -808,8 +842,12 @@ class ObdService {
   }
 
   /// Sends `AT MA`, waits [windowMs] and stops the monitor with a raw space.
-  /// Returns everything the adapter printed up to its prompt.
-  Future<String> _monitorUnlocked(int windowMs) async {
+  /// Returns everything the adapter printed up to its prompt. [listening]
+  /// runs from sending `AT MA` to sending the stop character.
+  Future<String> _monitorUnlocked(
+    int windowMs, {
+    Stopwatch? listening,
+  }) async {
     final transport = _transport;
     if (transport == null || !transport.isConnected) {
       throw StateError('OBD connection lost');
@@ -817,14 +855,19 @@ class ObdService {
     final completer = Completer<String>();
     _pendingResponse = completer;
     try {
+      listening?.start();
       await transport.write('AT MA');
       // The adapter prompts by itself only when monitoring fails (`?`).
       final early = await Future.any<String?>([
         completer.future,
         Future<String?>.delayed(Duration(milliseconds: windowMs)),
       ]);
-      if (early != null) return early;
+      if (early != null) {
+        listening?.stop();
+        return early;
+      }
       await transport.writeRaw(' ');
+      listening?.stop();
       const lost = '\u0000';
       var reply = await completer.future.timeout(
         _atTimeout,

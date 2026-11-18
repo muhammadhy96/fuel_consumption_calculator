@@ -25,7 +25,7 @@ class TripIntegrator {
   /// CAN fuel reads further apart than this are not bridged.
   static const double maxCanGapSeconds = 5;
 
-  /// Integral of the raw ECU fuel byte over time (count x s), between
+  /// Integral of the raw ECU fuel count over time (count x s), between
   /// consecutive samples that carry a CAN read.
   double canRawSeconds = 0;
 
@@ -38,8 +38,17 @@ class TripIntegrator {
   int? _lastCanRaw;
   double _appFuelMlAtLastCan = 0;
 
-  /// The ECU's fuel over the trip at the estimated [CanFuelSignal] scale.
-  double get canFuelMl => canRawSeconds * CanFuelSignal.lphPerCount / 3.6;
+  /// Frames counted and listening time over the trip's CAN reads.
+  int canPeriodFrames = 0;
+  int canPeriodListenMs = 0;
+
+  /// The [CanFuelSignal] message period the reads measured, ms; null until
+  /// 20 frames were counted (trips recorded before it was logged have none).
+  double? get canFramePeriodMs =>
+      canPeriodFrames < 20 ? null : canPeriodListenMs / canPeriodFrames;
+
+  /// The ECU's fuel over the trip at the [CanFuelSignal] scale.
+  double get canFuelMl => canRawSeconds * CanFuelSignal.mlPerSecPerCount;
 
   void add(TripSample sample) {
     final last = _last;
@@ -61,6 +70,12 @@ class TripIntegrator {
   void _addCan(TripSample sample) {
     final raw = sample.canFuelRaw;
     if (raw == null) return;
+    final frames = sample.canFrameCount;
+    final listenMs = sample.canListenMs;
+    if (frames != null && frames > 0 && listenMs != null && listenMs > 0) {
+      canPeriodFrames += frames;
+      canPeriodListenMs += listenMs;
+    }
     final lastTime = _lastCanTime;
     final lastRaw = _lastCanRaw;
     if (lastTime != null && lastRaw != null) {
@@ -94,5 +109,7 @@ class TripIntegrator {
     _lastCanTime = null;
     _lastCanRaw = null;
     _appFuelMlAtLastCan = 0;
+    canPeriodFrames = 0;
+    canPeriodListenMs = 0;
   }
 }

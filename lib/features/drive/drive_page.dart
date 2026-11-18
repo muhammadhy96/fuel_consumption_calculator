@@ -455,7 +455,8 @@ class _DrivePageState extends State<DrivePage> {
     final fuel = rawFuel.isFinite && rawFuel >= 0 ? rawFuel : 0.0;
     _timeSeconds = _sampleStopwatch.elapsedMilliseconds / 1000.0;
     final smoothFuel = obd.pushFuelSample(fuel);
-    final canFrame = obd.takeCanFrame();
+    final canRead = obd.takeCanRead();
+    final canFrame = canRead?.frame;
 
     final sample = TripSample(
       timeSeconds: _timeSeconds,
@@ -472,8 +473,11 @@ class _DrivePageState extends State<DrivePage> {
       absoluteLoadPercent: obd.absoluteLoadPercent ?? 0,
       gpsSpeedKph: _gps.speedKph,
       gpsSpeedAccuracyKph: _gps.speedAccuracyKph,
-      canFuelRaw: canFrame?[CanFuelSignal.fuelByte],
+      canFuelRaw:
+          canFrame == null ? null : CanFuelSignal.rawFromFrame(canFrame),
       canFrameHex: canFrame == null ? null : canFrameHex(canFrame),
+      canFrameCount: canRead?.frameCount,
+      canListenMs: canRead?.listenMs,
     );
     trip.addSample(sample);
 

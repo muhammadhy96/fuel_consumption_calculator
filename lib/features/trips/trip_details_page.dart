@@ -157,6 +157,10 @@ class _TripDetailsPageState extends State<TripDetailsPage> {
                           ? (can.appFuelMlOverCan / can.canFuelMl)
                               .toStringAsFixed(2)
                           : '--'),
+                  if (can.canFramePeriodMs case final period?)
+                    _StatCell(
+                        label: '0x545 period',
+                        value: '${period.toStringAsFixed(1)} ms'),
                   _StatCell(
                       label: 'CAN coverage',
                       value: trip.durationSeconds > 0
