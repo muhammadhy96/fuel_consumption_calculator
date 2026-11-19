@@ -31,6 +31,21 @@ class CanFuelSignal {
       ? frame[fuelByte] | (frame[fuelByte + 1] << 8)
       : null;
 
+  /// Mean count over [frames], or null when none decodes. One read prints
+  /// ~12 consecutive frames (~120 ms of fuel); their mean is a less noisy
+  /// sample of the flow than the newest frame alone.
+  static double? meanRaw(Iterable<List<int>> frames) {
+    var sum = 0;
+    var n = 0;
+    for (final frame in frames) {
+      final raw = rawFromFrame(frame);
+      if (raw == null) continue;
+      sum += raw;
+      n++;
+    }
+    return n == 0 ? null : sum / n;
+  }
+
   /// [rawFromFrame] of a frame stored as hex (`8C 12 01 89 ...`), or null.
   static int? rawFromHex(String? hex) {
     if (hex == null) return null;
@@ -55,12 +70,14 @@ class CanFuelSignal {
   static double mlPerSecFromRaw(num raw) => raw * mlPerSecPerCount;
 }
 
-/// One [CanFuelSignal] read: the newest frame, how many frames the adapter
-/// printed and how long it listened for them.
+/// One [CanFuelSignal] read: the newest frame, the mean count over all the
+/// frames the adapter printed, how many there were and how long it listened
+/// for them.
 class CanRead {
-  const CanRead(this.frame, {this.frameCount, this.listenMs});
+  const CanRead(this.frame, {this.rawMean, this.frameCount, this.listenMs});
 
   final List<int> frame;
+  final double? rawMean;
   final int? frameCount;
   final int? listenMs;
 }

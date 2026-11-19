@@ -635,7 +635,7 @@ class _CanFuelCard extends StatelessWidget {
             ],
           ));
         }
-        final raw = obd.canFuelRaw;
+        final raw = obd.canFuelRawMean;
         final canMlPerSec = obd.canFuelMlPerSec;
         final period = obd.canFramePeriodMs;
         final covered = trip.canCoveredSeconds;
@@ -650,8 +650,8 @@ class _CanFuelCard extends StatelessWidget {
               children: [
                 Expanded(
                   child: _TripStatCell(
-                    label: 'ECU raw',
-                    value: raw?.toString() ?? '--',
+                    label: 'ECU raw (avg)',
+                    value: raw?.toStringAsFixed(1) ?? '--',
                     unit: '',
                   ),
                 ),

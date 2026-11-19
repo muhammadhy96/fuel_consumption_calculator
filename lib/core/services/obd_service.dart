@@ -105,6 +105,7 @@ class ObdService {
   /// Frames the last read printed and how long it listened for them.
   int _lastCanFrameCount = 0;
   int _lastCanListenMs = 0;
+  double? _lastCanRawMean;
 
   /// Session totals of [_lastCanFrameCount] / [_lastCanListenMs] over reads
   /// with the filter honoured, for [canFramePeriodMs].
@@ -190,6 +191,9 @@ class ObdService {
   /// milliseconds it listened (from sending `AT MA` to the stop character).
   int get lastCanFrameCount => _lastCanFrameCount;
   int get lastCanListenMs => _lastCanListenMs;
+
+  /// Mean [CanFuelSignal] count over all frames of the last read, or null.
+  double? get lastCanRawMean => _lastCanRawMean;
 
   /// The bus period of [CanFuelSignal] measured this session: listening time
   /// over frames received, null until 20 frames were counted. With the
@@ -828,6 +832,7 @@ class ObdService {
         _recordCanCapture(frames.length, adapt: windowMs == null);
         _lastCanFrameCount = frames.length;
         _lastCanListenMs = listenMs;
+        _lastCanRawMean = CanFuelSignal.meanRaw(frames);
         // Tagged reads also print other IDs and can overflow: not counted.
         if (frames.isNotEmpty && listenMs > 0 && !tagged) {
           _canPeriodFrames += frames.length;

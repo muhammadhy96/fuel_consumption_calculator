@@ -18,6 +18,7 @@ class TripSample {
     this.gpsSpeedAccuracyKph,
     this.canFuelRaw,
     this.canFrameHex,
+    this.canFuelRawMean,
     this.canFrameCount,
     this.canListenMs,
   });
@@ -56,9 +57,19 @@ class TripSample {
   final int? canFrameCount;
   final int? canListenMs;
 
-  /// [canFuelRaw] at the [CanFuelSignal] scale, mL/s.
-  double? get canFuelMlPerSec =>
-      canFuelRaw == null ? null : CanFuelSignal.mlPerSecFromRaw(canFuelRaw!);
+  /// Mean count over all frames of the read (~12, about 120 ms of fuel);
+  /// null in trips recorded before it was logged.
+  final double? canFuelRawMean;
+
+  /// The count the ECU fuel is taken from: [canFuelRawMean] when logged, else
+  /// [canFuelRaw] of the newest frame.
+  double? get canFuelCount => canFuelRawMean ?? canFuelRaw?.toDouble();
+
+  /// [canFuelCount] at the [CanFuelSignal] scale, mL/s.
+  double? get canFuelMlPerSec {
+    final count = canFuelCount;
+    return count == null ? null : CanFuelSignal.mlPerSecFromRaw(count);
+  }
 
   /// The speed the trip distance is integrated from.
   ///
@@ -73,7 +84,7 @@ class TripSample {
   }
 
   /// Column count of the layout [toCsvRow] writes.
-  static const int csvColumnCount = 19;
+  static const int csvColumnCount = 20;
 
   List<dynamic> toCsvRow() => [
         timeSeconds,
@@ -97,26 +108,27 @@ class TripSample {
         canFuelMlPerSec,
         canFrameCount,
         canListenMs,
+        canFuelRawMean,
       ];
 
   /// Reads a row of any layout the app has written.
   ///
-  /// Current layout, 19 columns:
+  /// Current layout, 20 columns:
   ///   time, RPM, MAP, speed, IAT, fuel, MAF, λ, STFT, LTFT, 0103, abs load,
   ///   GPS speed, GPS speed accuracy, CAN fuel raw, CAN frame, CAN fuel mL/s,
-  ///   CAN frames in window, CAN window ms
+  ///   CAN frames in window, CAN window ms, CAN fuel mean raw
   ///
-  /// The CAN mL/s column is read back from the raw count, so a new scale
-  /// applies to old trips. The same layout without the last three columns
-  /// (16), without the CAN columns (14), and without the GPS columns too (12),
+  /// The CAN mL/s column is read back from the raw counts, so a new scale
+  /// applies to old trips. The same layout without the last column (19),
+  /// without the last four columns (16), without the CAN columns (14), and without the GPS columns too (12),
   /// came before it. Earlier
   /// layouts logged calculated engine load (0104) at index 6, shifting
   /// everything after it by one, and grew by appending columns: 5 (no speed),
   /// 6, 9 (to λ), 11 (+ trims), 12 (+ 0103) and 13 (+ abs load).
   ///
   /// 12 columns is both a current-layout row without GPS and a legacy one; the
-  /// file header settles it through [hasEngineLoadColumn]. Without it, 12, 14
-  /// and 16 columns are read as the current layout. Rows under 9 columns predate
+  /// file header settles it through [hasEngineLoadColumn]. Without it, 12, 14,
+  /// 16 and 19 columns are read as the current layout. Rows under 9 columns predate
   /// engine load and share the current layout's first six columns, so they
   /// always parse.
   factory TripSample.fromCsvRow(
@@ -124,7 +136,7 @@ class TripSample {
     bool? hasEngineLoadColumn,
   }) {
     final isCurrentLayout = hasEngineLoadColumn == null
-        ? const {12, 14, 16, csvColumnCount}.contains(row.length)
+        ? const {12, 14, 16, 19, csvColumnCount}.contains(row.length)
         : !hasEngineLoadColumn && row.length >= 9;
     return isCurrentLayout
         ? TripSample._fromCurrentRow(row)
@@ -151,6 +163,7 @@ class TripSample {
       canFrameHex: row.length > 15 ? _textOrNull(row[15]) : null,
       canFrameCount: row.length > 17 ? _numOrNull(row[17])?.toInt() : null,
       canListenMs: row.length > 18 ? _numOrNull(row[18])?.toInt() : null,
+      canFuelRawMean: row.length > 19 ? _numOrNull(row[19]) : null,
     );
   }
 

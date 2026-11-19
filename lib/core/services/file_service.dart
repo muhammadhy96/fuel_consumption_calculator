@@ -40,6 +40,7 @@ const List<String> _tripCsvHeader = [
   'CAN 545 Fuel (mL/s)',
   'CAN 545 Frames in Window',
   'CAN Window (ms)',
+  'CAN 545 Fuel Mean (raw)',
 ];
 
 const String _legacyEngineLoadHeader = 'Engine Load (%)';

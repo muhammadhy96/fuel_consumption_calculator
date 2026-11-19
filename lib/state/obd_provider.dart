@@ -62,6 +62,7 @@ class ObdProvider extends ChangeNotifier {
 
   /// Latest [CanFuelSignal] frame read from the broadcast traffic.
   List<int>? canFrame;
+  double? _canRawMean;
   int? _canFrameAtMs;
 
   /// Captured since the last [takeCanRead], so each read lands in exactly
@@ -129,9 +130,17 @@ class ObdProvider extends ChangeNotifier {
     return CanFuelSignal.rawFromFrame(frame);
   }
 
-  /// [canFuelRaw] at the estimated scale, mL/s.
-  double? get canFuelMlPerSec {
+  /// Mean count over all frames of the latest read (falling back to
+  /// [canFuelRaw]), null when that read is stale.
+  double? get canFuelRawMean {
     final raw = canFuelRaw;
+    if (raw == null) return null;
+    return _canRawMean ?? raw.toDouble();
+  }
+
+  /// [canFuelRawMean] at the [CanFuelSignal] scale, mL/s.
+  double? get canFuelMlPerSec {
+    final raw = canFuelRawMean;
     return raw == null ? null : CanFuelSignal.mlPerSecFromRaw(raw);
   }
 
@@ -373,9 +382,11 @@ class ObdProvider extends ChangeNotifier {
   void _handleCanFrame(List<int> frame) {
     if (_disposed || CanFuelSignal.rawFromFrame(frame) == null) return;
     canFrame = frame;
+    _canRawMean = _obdService.lastCanRawMean;
     _canFrameAtMs = _clock.elapsedMilliseconds;
     _pendingCanRead = CanRead(
       frame,
+      rawMean: _canRawMean,
       frameCount: _obdService.lastCanFrameCount,
       listenMs: _obdService.lastCanListenMs,
     );
@@ -519,6 +530,7 @@ class ObdProvider extends ChangeNotifier {
     baroKpa = null;
     _decodedAtMs.clear();
     canFrame = null;
+    _canRawMean = null;
     _canFrameAtMs = null;
     _pendingCanRead = null;
     _smoothFuelWindow.clear();

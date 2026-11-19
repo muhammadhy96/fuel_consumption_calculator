@@ -100,6 +100,14 @@ void main() {
       expect(CanFuelSignal.rawFromHex('ZZ 12 01'), isNull);
       expect(CanFuelSignal.rawFromHex(null), isNull);
     });
+
+    test('averages the count over all frames of a read', () {
+      List<int> f(int raw) => [0x8C, raw & 0xFF, raw >> 8, 0x89, 0, 0, 0, 0];
+      expect(CanFuelSignal.meanRaw([f(20), f(30), f(250), f(300)]), 150);
+      // Too short to hold the count: skipped, not counted as 0.
+      expect(CanFuelSignal.meanRaw([f(20), [0x8C, 0x12], f(40)]), 30);
+      expect(CanFuelSignal.meanRaw([]), isNull);
+    });
   });
 
   group('TripSample CSV', () {
@@ -139,6 +147,38 @@ void main() {
       expect(none.canFuelRaw, isNull);
       expect(none.canFuelMlPerSec, isNull);
       expect(none.canFrameCount, isNull);
+      expect(none.canFuelRawMean, isNull);
+    });
+
+    test('takes the ECU fuel from the mean over the read when logged', () {
+      final s = TripSample(
+        timeSeconds: 1.5,
+        rpm: 900,
+        mapKpa: 30,
+        speedKph: 12,
+        iatKelvin: 300,
+        fuelMlPerSec: 0.2,
+        mafGramsPerSec: 0,
+        equivRatio: 1,
+        canFuelRaw: 26,
+        canFrameHex: '94 1A 00 89 67 00 5E 00',
+        canFuelRawMean: 22.5,
+        canFrameCount: 12,
+        canListenMs: 123,
+      );
+      final row = s.toCsvRow();
+      expect(row[19], 22.5);
+      expect(row[16] as double, closeTo(22.5 * 0.0128, 1e-9));
+      final back = TripSample.fromCsvRow(row);
+      expect(back.canFuelRaw, 26);
+      expect(back.canFuelRawMean, 22.5);
+      expect(back.canFuelCount, 22.5);
+      // A 19-column row from the previous build: the newest frame's count.
+      final old = TripSample.fromCsvRow(row.sublist(0, 19));
+      expect(old.canFuelRawMean, isNull);
+      expect(old.canFuelCount, 26);
+      expect(old.canFrameCount, 12);
+      expect(old.canFuelMlPerSec, closeTo(26 * 0.0128, 1e-9));
     });
 
     test('decodes the count again from the stored frame', () {
@@ -202,6 +242,25 @@ void main() {
       expect(totals.canFuelMl, closeTo(50 * 0.0128, 1e-9));
       // No frame counts logged: no period.
       expect(totals.canFramePeriodMs, isNull);
+    });
+
+    test('integrates the mean over each read when it is logged', () {
+      TripSample read(double t, int raw, double? mean) => TripSample(
+            timeSeconds: t,
+            rpm: 800,
+            mapKpa: 35,
+            speedKph: 0,
+            iatKelvin: 300,
+            fuelMlPerSec: 0.2,
+            mafGramsPerSec: 0,
+            equivRatio: 1,
+            canFuelRaw: raw,
+            canFuelRawMean: mean,
+          );
+      final totals = TripIntegrator()
+        ..addAll([read(0, 30, 20), read(1, 50, 40), read(2, 10, null)]);
+      // (20 + 40) / 2 for 1 s, then (40 + 10) / 2 for 1 s.
+      expect(totals.canRawSeconds, closeTo(30 + 25, 1e-9));
     });
 
     test('measures the message period from frames per window', () {
@@ -298,6 +357,32 @@ void main() {
       // Timer resolution on the test host makes the fake's 50 ms inexact.
       expect(service.canFramePeriodMs, isNotNull);
       expect(service.canFramePeriodMs!, inInclusiveRange(30.0, 90.0));
+    });
+
+    test('averages the fuel count over all frames of each read', () async {
+      elm.frameInterval = const Duration(milliseconds: 20);
+      await connect();
+      expect(service.canCaptureActive, isTrue);
+      final frames = <List<int>>[];
+      final means = <double?>[];
+      final counts = <int>[];
+      service.onCanFrame = (f) {
+        frames.add(f);
+        means.add(service.lastCanRawMean);
+        counts.add(service.lastCanFrameCount);
+      };
+      await service.startListening((_) {});
+      await Future<void>.delayed(const Duration(milliseconds: 2500));
+      await service.stopListening();
+
+      expect(frames, isNotEmpty);
+      for (var i = 0; i < frames.length; i++) {
+        // The fake counts up by 1 per frame: the mean of n consecutive counts
+        // ending at the newest is newest - (n - 1) / 2.
+        final newest = CanFuelSignal.rawFromFrame(frames[i])!;
+        expect(counts[i], greaterThan(1));
+        expect(means[i], closeTo(newest - (counts[i] - 1) / 2, 1e-9));
+      }
     });
 
     test('picks 0x545 out of an adapter that ignores its monitor filter',

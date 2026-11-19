@@ -25,8 +25,9 @@ class TripIntegrator {
   /// CAN fuel reads further apart than this are not bridged.
   static const double maxCanGapSeconds = 5;
 
-  /// Integral of the raw ECU fuel count over time (count x s), between
-  /// consecutive samples that carry a CAN read.
+  /// Integral of the ECU fuel count ([TripSample.canFuelCount], the mean
+  /// over each read's frames) over time (count x s), between consecutive
+  /// samples that carry a CAN read.
   double canRawSeconds = 0;
 
   /// Time covered by [canRawSeconds], and the app's own fuel over exactly
@@ -35,7 +36,7 @@ class TripIntegrator {
   double appFuelMlOverCan = 0;
 
   double? _lastCanTime;
-  int? _lastCanRaw;
+  double? _lastCanRaw;
   double _appFuelMlAtLastCan = 0;
 
   /// Frames counted and listening time over the trip's CAN reads.
@@ -68,7 +69,7 @@ class TripIntegrator {
   }
 
   void _addCan(TripSample sample) {
-    final raw = sample.canFuelRaw;
+    final raw = sample.canFuelCount;
     if (raw == null) return;
     final frames = sample.canFrameCount;
     final listenMs = sample.canListenMs;

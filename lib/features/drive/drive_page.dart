@@ -476,6 +476,7 @@ class _DrivePageState extends State<DrivePage> {
       canFuelRaw:
           canFrame == null ? null : CanFuelSignal.rawFromFrame(canFrame),
       canFrameHex: canFrame == null ? null : canFrameHex(canFrame),
+      canFuelRawMean: canRead?.rawMean,
       canFrameCount: canRead?.frameCount,
       canListenMs: canRead?.listenMs,
     );
